@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Smith Chart — Random Thoughts of a Random Guy</title>
+  <meta name="description" content="Interactive Smith chart with impedance/admittance grids, adjustable resolution, and live hover readout.">
+  <link rel="stylesheet" href="css/style.css">
+  <style>
+    .smith-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 300px;
+      gap: var(--space-xl);
+      align-items: start;
+      max-width: var(--max-width-wide);
+      margin: 0 auto;
+    }
+
+    @media (max-width: 820px) {
+      .smith-layout { grid-template-columns: 1fr; }
+    }
+
+    /* ---- Chart (always white, both themes) ---- */
+    .chart-card {
+      background: #ffffff;
+      border: 1px solid #e2e2e2;
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-md);
+      padding: var(--space-md);
+    }
+
+    #chart-wrap {
+      position: relative;
+      width: 100%;
+      max-width: 620px;
+      margin: 0 auto;
+      aspect-ratio: 1 / 1;
+    }
+
+    #chart-wrap canvas {
+      position: absolute;
+      inset: 0;
+      display: block;
+    }
+
+    #hover-canvas { cursor: crosshair; }
+
+    /* ---- Controls ---- */
+    .panel {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: var(--space-lg);
+      box-shadow: var(--shadow-sm);
+    }
+    .panel + .panel { margin-top: var(--space-lg); }
+
+    .panel__title {
+      font-size: var(--text-xs);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-secondary);
+      margin-bottom: var(--space-md);
+    }
+
+    .ctrl { margin-bottom: var(--space-md); }
+    .ctrl:last-child { margin-bottom: 0; }
+
+    .ctrl__row {
+      display: flex;
+      align-items: center;
+      gap: var(--space-sm);
+    }
+
+    .switch {
+      display: flex;
+      align-items: center;
+      gap: var(--space-sm);
+      cursor: pointer;
+      font-size: var(--text-sm);
+      user-select: none;
+    }
+    .switch input { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+    .swatch { width: 12px; height: 12px; border-radius: 3px; flex: none; }
+    .swatch--z { background: #c0392b; }
+    .swatch--y { background: #2166ac; }
+
+    .ctrl label.field-label {
+      display: block;
+      font-size: var(--text-sm);
+      color: var(--text-secondary);
+      margin-bottom: var(--space-xs);
+    }
+    #opt-resolution { width: 100%; accent-color: var(--accent); cursor: pointer; }
+    #resolution-label {
+      font-family: var(--font-mono);
+      font-size: var(--text-sm);
+      color: var(--text-primary);
+      font-weight: 600;
+    }
+
+    .z0-field {
+      display: flex;
+      align-items: center;
+      gap: var(--space-sm);
+    }
+    .z0-field input {
+      width: 90px;
+      padding: 6px 8px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--bg);
+      color: var(--text-primary);
+      font-family: var(--font-mono);
+      font-size: var(--text-sm);
+    }
+
+    /* ---- Readout ---- */
+    .readout__grid {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 6px var(--space-md);
+      font-family: var(--font-mono);
+      font-size: var(--text-sm);
+      opacity: 0.45;
+      transition: opacity var(--transition-fast);
+    }
+    .readout--active .readout__grid { opacity: 1; }
+    .readout__grid dt {
+      color: var(--text-secondary);
+      white-space: nowrap;
+    }
+    .readout__grid dd {
+      color: var(--text-primary);
+      margin: 0;
+      font-weight: 600;
+      word-break: break-word;
+    }
+    .readout__grid dd.sub { color: var(--text-secondary); font-weight: 500; font-size: var(--text-xs); }
+    #readout-hint {
+      font-size: var(--text-xs);
+      color: var(--text-tertiary);
+      font-style: italic;
+      margin-top: var(--space-sm);
+    }
+
+    .back-link {
+      display: inline-block;
+      margin-top: var(--space-xl);
+      color: var(--accent);
+      text-decoration: none;
+      font-weight: 500;
+    }
+    .back-link:hover { text-decoration: underline; }
+  </style>
+</head>
+
+<body>
+  <!-- ====== Navigation ====== -->
+  <nav class="nav" id="main-nav"></nav>
+
+  <!-- ====== Main content ====== -->
+  <main class="page-content">
+    <div class="container" style="max-width: var(--max-width-wide);">
+
+      <div class="page-header fade-in" style="margin-bottom: var(--space-xl);">
+        <h1 class="page-header__title"
+          style="font-size: var(--text-3xl); font-weight: 700; margin-bottom: var(--space-sm); letter-spacing: -0.02em;">
+          Smith Chart</h1>
+        <p style="font-family: var(--font-serif); color: var(--text-secondary); font-size: var(--text-lg);">
+          Interactive impedance / admittance chart. Toggle the grids, adjust the grid resolution, and
+          hover anywhere to read the normalized impedance, admittance, reflection coefficient, and VSWR
+          at that point.</p>
+      </div>
+
+      <div class="smith-layout fade-in fade-in-delay-1">
+
+        <!-- Chart -->
+        <div class="chart-card">
+          <div id="chart-wrap">
+            <canvas id="grid-canvas"></canvas>
+            <canvas id="hover-canvas"></canvas>
+          </div>
+        </div>
+
+        <!-- Controls -->
+        <div>
+          <div class="panel">
+            <p class="panel__title">Grids</p>
+
+            <div class="ctrl">
+              <label class="switch">
+                <input type="checkbox" id="opt-impedance" checked>
+                <span class="swatch swatch--z"></span>
+                Impedance (r, x)
+              </label>
+            </div>
+            <div class="ctrl">
+              <label class="switch">
+                <input type="checkbox" id="opt-admittance">
+                <span class="swatch swatch--y"></span>
+                Admittance (g, b)
+              </label>
+            </div>
+
+            <div class="ctrl" style="margin-top: var(--space-lg);">
+              <label class="field-label" for="opt-resolution">
+                Grid resolution — <span id="resolution-label">Standard</span>
+              </label>
+              <input type="range" id="opt-resolution" min="1" max="5" step="1" value="2">
+            </div>
+
+            <div class="ctrl" style="margin-top: var(--space-lg);">
+              <label class="field-label">Reference impedance Z₀</label>
+              <div class="z0-field">
+                <input type="number" id="opt-z0" value="50" min="1" step="1">
+                <span style="color: var(--text-secondary); font-family: var(--font-mono);">Ω</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel readout" id="readout">
+            <p class="panel__title">Readout</p>
+            <dl class="readout__grid">
+              <dt id="row-z">z</dt>       <dd id="rd-z">—</dd>
+              <dt id="row-z-ohm">Z</dt>   <dd class="sub" id="rd-z-ohm">—</dd>
+              <dt id="row-y">y</dt>       <dd id="rd-y">—</dd>
+              <dt id="row-y-siemens">Y</dt><dd class="sub" id="rd-y-siemens">—</dd>
+              <dt>Γ</dt>                  <dd id="rd-gamma">—</dd>
+              <dt>VSWR</dt>              <dd id="rd-vswr">—</dd>
+            </dl>
+            <p id="readout-hint">Hover over the chart to read values.</p>
+          </div>
+        </div>
+      </div>
+
+      <a href="https://xugengyu.github.io/paul-blog/apps.html" class="back-link">&larr; Back to Apps</a>
+
+    </div>
+  </main>
+
+  <footer class="footer">
+    <p class="footer__text">&copy; 2026 Random Thoughts of a Random Guy. Built with care.</p>
+  </footer>
+
+  <script src="js/nav.js"></script>
+  <script src="js/main.js"></script>
+  <script src="js/smith.js"></script>
+</body>
+
+</html>
