@@ -90,6 +90,8 @@
     // but the value is realized by a line of impedance Zc and some length. dir:0 → move both ways.
     tpo: { type: 'shunt',  kind: 'TL', domain: 'y', part: 'im', dir: 0, stub: true, term: 'open',  name: 'Shunt open stub' },
     tps: { type: 'shunt',  kind: 'TL', domain: 'y', part: 'im', dir: 0, stub: true, term: 'short', name: 'Shunt short stub' },
+    tso: { type: 'series', kind: 'TL', domain: 'z', part: 'im', dir: 0, stub: true, term: 'open',  name: 'Series open stub' },
+    tss: { type: 'series', kind: 'TL', domain: 'z', part: 'im', dir: 0, stub: true, term: 'short', name: 'Series short stub' },
     // Cascaded (through) series line — rotates Γ on a circle centred at (Zc−Z0)/(Zc+Z0)
     line:{ type: 'series', kind: 'TL', line: true, name: 'Series line (through)' },
   };
@@ -238,13 +240,16 @@
     if (comp.stub) {
       const theta = stubTheta(comp, entry.dv, entry.zc);
       const theta_f = theta * Rf;
-      let B_f = 0;
-      if (comp.term === 'open') {
-        B_f = Math.tan(theta_f) / entry.zc;
-      } else {
-        B_f = -1 / (entry.zc * Math.tan(theta_f));
+      const z0 = getZ0();
+      let dv_f;
+      if (comp.domain === 'z') {                 // series stub: reactance X = dv * z0
+        const X_f = comp.term === 'short' ? entry.zc * Math.tan(theta_f) : -entry.zc / Math.tan(theta_f);
+        dv_f = X_f / z0;
+      } else {                                    // shunt stub: susceptance B = dv / z0
+        const B_f = comp.term === 'open' ? Math.tan(theta_f) / entry.zc : -1 / (entry.zc * Math.tan(theta_f));
+        dv_f = B_f * z0;
       }
-      return applyComp(z, comp, B_f * getZ0());
+      return applyComp(z, comp, dv_f);
     }
     
     let dv_f = entry.dv;
@@ -1053,7 +1058,7 @@
         g.appendChild(el('line', { x1: x, y1: railY, x2: s, y2: railY, class: 'sch-wire' }));
         tlBox(g, s, railY, symLen, col);
         g.appendChild(el('line', { x1: s + symLen, y1: railY, x2: x + slot, y2: railY, class: 'sch-wire' }));
-      } else if (o.comp.stub) {
+      } else if (o.comp.stub && o.comp.type === 'shunt') {
         g.appendChild(el('line', { x1: x, y1: railY, x2: x + slot, y2: railY, class: 'sch-wire' }));
         g.appendChild(el('circle', { cx: xc, cy: railY, r: 2.5, class: 'sch-wire', fill: 'currentColor' }));
         g.appendChild(el('line', { x1: xc, y1: railY, x2: xc, y2: railY + 10, class: 'sch-wire' }));
@@ -1061,6 +1066,13 @@
         g.appendChild(el('line', { x1: xc - 4, y1: railY + 10, x2: xc - 4, y2: bot, stroke: col, class: 'sch-comp' }));
         g.appendChild(el('line', { x1: xc + 4, y1: railY + 10, x2: xc + 4, y2: bot, stroke: col, class: 'sch-comp' }));
         termSymbol(g, xc, bot, o.comp.term, +1);
+      } else if (o.comp.stub) {
+        // series stub: inline twin-line body (like a through line) capped
+        // with an open/short glyph above it to show it's a dead-end stub.
+        g.appendChild(el('line', { x1: x, y1: railY, x2: s, y2: railY, class: 'sch-wire' }));
+        tlBox(g, s, railY, symLen, col);
+        termSymbol(g, s + symLen / 2, railY - 4, o.comp.term, -1);
+        g.appendChild(el('line', { x1: s + symLen, y1: railY, x2: x + slot, y2: railY, class: 'sch-wire' }));
       } else if (o.comp.type === 'series') {
         g.appendChild(el('line', { x1: x, y1: railY, x2: s, y2: railY, class: 'sch-wire' }));
         g.appendChild(el('path', { d: symbolPath(o.comp.kind, symLen), stroke: col, class: 'sch-comp', transform: 'translate(' + s + ',' + railY + ')' }));
