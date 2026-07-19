@@ -5,20 +5,49 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Smith Chart — Random Thoughts of a Random Guy</title>
-  <meta name="description" content="Interactive Smith chart with impedance/admittance grids, adjustable resolution, and live hover readout.">
+  <meta name="description" content="Interactive Smith chart with a circuit builder: enter a load, add series/shunt L/C/R components, and place them by moving along constant-R/G/X/B circles.">
   <link rel="stylesheet" href="css/style.css">
   <style>
-    .smith-layout {
+    .smith-top {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) 300px;
+      grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
       gap: var(--space-xl);
       align-items: start;
       max-width: var(--max-width-wide);
       margin: 0 auto;
     }
+    .smith-bottom {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-xl);
+      max-width: var(--max-width-wide);
+      margin: var(--space-xl) auto 0;
+    }
 
-    @media (max-width: 820px) {
-      .smith-layout { grid-template-columns: 1fr; }
+    @media (max-width: 860px) {
+      .smith-top, .smith-bottom { grid-template-columns: 1fr; }
+    }
+
+    /* ---- Circuit view (full-width, on top) ---- */
+    .smith-circuit {
+      max-width: var(--max-width-wide);
+      margin: 0 auto var(--space-xl);
+    }
+    .circuit-view {
+      display: flex;
+      gap: var(--space-xl);
+      align-items: flex-start;
+    }
+    .circuit-view .schematic-wrap {
+      flex: 1 1 auto;
+      min-width: 0;
+      margin-top: 0;
+    }
+    .circuit-info { flex: 0 0 240px; }
+    .circuit-info .comp-list { margin-top: 0; }
+    @media (max-width: 720px) {
+      .circuit-view { flex-direction: column; }
+      .circuit-info { flex-basis: auto; width: 100%; }
     }
 
     /* ---- Chart (always white, both themes) ---- */
@@ -29,7 +58,6 @@
       box-shadow: var(--shadow-md);
       padding: var(--space-md);
     }
-
     #chart-wrap {
       position: relative;
       width: 100%;
@@ -37,16 +65,11 @@
       margin: 0 auto;
       aspect-ratio: 1 / 1;
     }
-
-    #chart-wrap canvas {
-      position: absolute;
-      inset: 0;
-      display: block;
-    }
-
+    #chart-wrap canvas { position: absolute; inset: 0; display: block; }
     #hover-canvas { cursor: crosshair; }
+    #hover-canvas.armed { cursor: pointer; }
 
-    /* ---- Controls ---- */
+    /* ---- Panels ---- */
     .panel {
       background: var(--bg-elevated);
       border: 1px solid var(--border);
@@ -55,7 +78,6 @@
       box-shadow: var(--shadow-sm);
     }
     .panel + .panel { margin-top: var(--space-lg); }
-
     .panel__title {
       font-size: var(--text-xs);
       font-weight: 700;
@@ -65,49 +87,22 @@
       margin-bottom: var(--space-md);
     }
 
-    .ctrl { margin-bottom: var(--space-md); }
-    .ctrl:last-child { margin-bottom: 0; }
-
-    .ctrl__row {
-      display: flex;
-      align-items: center;
-      gap: var(--space-sm);
+    /* ---- Load / freq / z0 inputs ---- */
+    .field-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: var(--space-md);
+      margin-bottom: var(--space-lg);
     }
-
-    .switch {
-      display: flex;
-      align-items: center;
-      gap: var(--space-sm);
-      cursor: pointer;
-      font-size: var(--text-sm);
-      user-select: none;
-    }
-    .switch input { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
-    .swatch { width: 12px; height: 12px; border-radius: 3px; flex: none; }
-    .swatch--z { background: #c0392b; }
-    .swatch--y { background: #2166ac; }
-
-    .ctrl label.field-label {
-      display: block;
-      font-size: var(--text-sm);
+    .field { display: flex; flex-direction: column; gap: 4px; }
+    .field label {
+      font-size: var(--text-xs);
       color: var(--text-secondary);
-      margin-bottom: var(--space-xs);
-    }
-    #opt-resolution { width: 100%; accent-color: var(--accent); cursor: pointer; }
-    #resolution-label {
-      font-family: var(--font-mono);
-      font-size: var(--text-sm);
-      color: var(--text-primary);
       font-weight: 600;
     }
-
-    .z0-field {
-      display: flex;
-      align-items: center;
-      gap: var(--space-sm);
-    }
-    .z0-field input {
-      width: 90px;
+    .field .input-row { display: flex; align-items: center; gap: 6px; }
+    .field input, .field select {
+      width: 100%;
       padding: 6px 8px;
       border: 1px solid var(--border);
       border-radius: var(--radius-sm);
@@ -116,43 +111,161 @@
       font-family: var(--font-mono);
       font-size: var(--text-sm);
     }
+    .field .unit { color: var(--text-secondary); font-family: var(--font-mono); font-size: var(--text-sm); }
 
-    /* ---- Readout ---- */
-    .readout__grid {
-      display: grid;
-      grid-template-columns: auto 1fr;
-      gap: 6px var(--space-md);
+    /* ---- Component buttons ---- */
+    .comp-group { margin-bottom: var(--space-md); }
+    .comp-group__label {
+      font-size: var(--text-xs);
+      font-weight: 600;
+      color: var(--text-secondary);
+      margin-bottom: 6px;
+    }
+    .comp-btns { display: flex; gap: var(--space-sm); }
+    .comp-btn {
+      flex: 1;
+      padding: 8px 4px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--bg);
+      color: var(--text-primary);
+      font-size: var(--text-sm);
+      font-weight: 600;
+      cursor: pointer;
+      transition: all var(--transition-fast);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+      line-height: 1.1;
+    }
+    .comp-btn small { font-weight: 500; color: var(--text-tertiary); font-size: 0.7em; }
+    .comp-btn:hover { border-color: var(--accent); }
+    .comp-btn.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+    .comp-btn.active small { color: rgba(255,255,255,0.8); }
+
+    .arm-hint {
+      font-size: var(--text-xs);
+      color: var(--accent);
+      background: var(--accent-light);
+      border-radius: var(--radius-sm);
+      padding: 8px 10px;
+      margin: var(--space-md) 0;
+      display: none;
+      line-height: 1.4;
+    }
+    .arm-hint.show { display: block; }
+    .arm-hint b { font-family: var(--font-mono); }
+
+    .row-actions { display: flex; gap: var(--space-sm); margin-top: var(--space-md); }
+    .btn-secondary {
+      flex: 1;
+      padding: 7px 10px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--bg);
+      color: var(--text-secondary);
+      font-size: var(--text-sm);
+      font-weight: 600;
+      cursor: pointer;
+      transition: all var(--transition-fast);
+    }
+    .btn-secondary:hover { border-color: var(--accent); color: var(--accent); }
+    .btn-secondary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* ---- Schematic ---- */
+    .schematic-wrap {
+      margin-top: var(--space-md);
+      overflow-x: auto;
+      border: 1px solid var(--border-light);
+      border-radius: var(--radius-sm);
+      background: var(--bg);
+      padding: var(--space-sm);
+    }
+    .schematic-wrap svg { display: block; }
+    .sch-wire   { stroke: var(--text-secondary); stroke-width: 1.6; fill: none; }
+    .sch-comp   { stroke: var(--text-primary); stroke-width: 1.8; fill: none; }
+    .sch-comp--last { stroke: var(--accent); }
+    .sch-load   { stroke: var(--node-rf, #E8A87C); stroke-width: 1.8; fill: none; }
+    .sch-label  { fill: var(--text-secondary); font-family: var(--font-mono); font-size: 11px; }
+    .sch-label--val { fill: var(--text-primary); font-weight: 600; }
+    .sch-hilite { opacity: 0; transition: opacity 120ms; }
+    .sch-item--hot .sch-hilite { opacity: 0.16; }
+    .sch-load-lbl { fill: var(--node-rf, #E8A87C); font-family: var(--font-mono); font-size: 11px; font-weight: 600; }
+
+    /* ---- Component list ---- */
+    .comp-list { margin-top: var(--space-md); font-family: var(--font-mono); font-size: var(--text-sm); }
+    .comp-list__item {
+      display: flex; justify-content: space-between; gap: var(--space-md);
+      padding: 4px 0; border-bottom: 1px solid var(--border-light);
+    }
+    .comp-list__item:last-child { border-bottom: none; }
+    .comp-list__item .lbl { color: var(--text-secondary); }
+    .comp-list__item .val { color: var(--text-primary); font-weight: 600; }
+
+    .zin-summary {
+      margin-top: var(--space-md);
+      padding-top: var(--space-md);
+      border-top: 1px solid var(--border);
       font-family: var(--font-mono);
       font-size: var(--text-sm);
-      opacity: 0.45;
-      transition: opacity var(--transition-fast);
     }
-    .readout--active .readout__grid { opacity: 1; }
-    .readout__grid dt {
-      color: var(--text-secondary);
+    .zin-summary .big { font-size: var(--text-base); font-weight: 700; color: var(--accent); }
+
+    /* ---- Hover readout (follows cursor) ---- */
+    .hover-readout {
+      position: fixed;
+      z-index: 50;
+      display: none;
+      pointer-events: none;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      box-shadow: var(--shadow-lg);
+      padding: 10px 12px;
+      min-width: 190px;
+    }
+    .readout__grid {
+      display: grid; grid-template-columns: auto 1fr; gap: 5px var(--space-md);
+      font-family: var(--font-mono); font-size: var(--text-sm);
+    }
+    .readout__grid dt { color: var(--text-secondary); white-space: nowrap; }
+    .readout__grid dd { color: var(--text-primary); margin: 0; font-weight: 600; white-space: nowrap; }
+    .readout__grid dd.sub { color: var(--text-secondary); font-weight: 500; font-size: var(--text-xs); }
+
+    /* ---- Display settings ---- */
+    .switch { display: flex; align-items: center; gap: var(--space-sm); cursor: pointer; font-size: var(--text-sm); user-select: none; margin-bottom: var(--space-md); }
+    .switch input { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+    .swatch { width: 12px; height: 12px; border-radius: 3px; flex: none; }
+    .swatch--z { background: #c0392b; }
+    .swatch--y { background: #2166ac; }
+    .swatch--q { background: #7c3aed; }
+
+    /* ---- Zc cursor tooltip ---- */
+    .zc-tip {
+      position: fixed;
+      z-index: 50;
+      display: none;
+      pointer-events: none;
+      background: #111;
+      color: #fff;
+      font-family: var(--font-mono);
+      font-size: var(--text-xs);
+      padding: 4px 8px;
+      border-radius: var(--radius-sm);
+      box-shadow: var(--shadow-md);
       white-space: nowrap;
     }
-    .readout__grid dd {
-      color: var(--text-primary);
-      margin: 0;
-      font-weight: 600;
-      word-break: break-word;
-    }
-    .readout__grid dd.sub { color: var(--text-secondary); font-weight: 500; font-size: var(--text-xs); }
-    #readout-hint {
-      font-size: var(--text-xs);
-      color: var(--text-tertiary);
-      font-style: italic;
-      margin-top: var(--space-sm);
-    }
+    .zc-tip small { color: rgba(255,255,255,0.7); }
+    .field-label { display: block; font-size: var(--text-sm); color: var(--text-secondary); margin-bottom: var(--space-xs); }
+    #opt-resolution { width: 100%; accent-color: var(--accent); cursor: pointer; }
+    #resolution-label { font-family: var(--font-mono); font-size: var(--text-sm); color: var(--text-primary); font-weight: 600; }
 
-    .back-link {
-      display: inline-block;
-      margin-top: var(--space-xl);
-      color: var(--accent);
-      text-decoration: none;
-      font-weight: 500;
-    }
+    .back-link { display: inline-block; margin-top: var(--space-xl); color: var(--accent); text-decoration: none; font-weight: 500; }
     .back-link:hover { text-decoration: underline; }
   </style>
 </head>
@@ -169,13 +282,23 @@
         <h1 class="page-header__title"
           style="font-size: var(--text-3xl); font-weight: 700; margin-bottom: var(--space-sm); letter-spacing: -0.02em;">
           Smith Chart</h1>
-        <p style="font-family: var(--font-serif); color: var(--text-secondary); font-size: var(--text-lg);">
-          Interactive impedance / admittance chart. Toggle the grids, adjust the grid resolution, and
-          hover anywhere to read the normalized impedance, admittance, reflection coefficient, and VSWR
-          at that point.</p>
       </div>
 
-      <div class="smith-layout fade-in fade-in-delay-1">
+      <!-- ===== Circuit view (on top, full width) ===== -->
+      <div class="smith-circuit fade-in fade-in-delay-1">
+        <div class="panel">
+          <p class="panel__title">Circuit</p>
+          <div class="circuit-view">
+            <div class="schematic-wrap" id="schematic"></div>
+            <div class="circuit-info">
+              <div class="zin-summary" id="zin-summary"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== Chart + build controls ===== -->
+      <div class="smith-top fade-in fade-in-delay-2">
 
         <!-- Chart -->
         <div class="chart-card">
@@ -185,53 +308,113 @@
           </div>
         </div>
 
-        <!-- Controls -->
+        <!-- Build controls -->
         <div>
           <div class="panel">
-            <p class="panel__title">Grids</p>
+            <p class="panel__title">Build network</p>
 
-            <div class="ctrl">
-              <label class="switch">
-                <input type="checkbox" id="opt-impedance" checked>
-                <span class="swatch swatch--z"></span>
-                Impedance (r, x)
-              </label>
-            </div>
-            <div class="ctrl">
-              <label class="switch">
-                <input type="checkbox" id="opt-admittance">
-                <span class="swatch swatch--y"></span>
-                Admittance (g, b)
-              </label>
-            </div>
-
-            <div class="ctrl" style="margin-top: var(--space-lg);">
-              <label class="field-label" for="opt-resolution">
-                Grid resolution — <span id="resolution-label">Standard</span>
-              </label>
-              <input type="range" id="opt-resolution" min="1" max="5" step="1" value="2">
-            </div>
-
-            <div class="ctrl" style="margin-top: var(--space-lg);">
-              <label class="field-label">Reference impedance Z₀</label>
-              <div class="z0-field">
-                <input type="number" id="opt-z0" value="50" min="1" step="1">
-                <span style="color: var(--text-secondary); font-family: var(--font-mono);">Ω</span>
+            <div class="field-grid">
+              <div class="field">
+                <label for="load-r">Load R</label>
+                <div class="input-row"><input type="number" id="load-r" value="25" step="1"><span class="unit">Ω</span></div>
               </div>
+              <div class="field">
+                <label for="load-x">Load X</label>
+                <div class="input-row"><input type="number" id="load-x" value="-30" step="1"><span class="unit">Ω</span></div>
+              </div>
+              <div class="field">
+                <label for="opt-z0">Z₀</label>
+                <div class="input-row"><input type="number" id="opt-z0" value="50" min="1" step="1"><span class="unit">Ω</span></div>
+              </div>
+              <div class="field">
+                <label for="freq">Frequency</label>
+                <div class="input-row">
+                  <input type="number" id="freq" value="2" min="0" step="0.1">
+                  <select id="freq-unit">
+                    <option value="1e3">kHz</option>
+                    <option value="1e6">MHz</option>
+                    <option value="1e9" selected>GHz</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <div class="comp-group">
+              <div class="comp-group__label">Series</div>
+              <div class="comp-btns">
+                <button class="comp-btn" data-comp="sL">L <small>+jX</small></button>
+                <button class="comp-btn" data-comp="sC">C <small>−jX</small></button>
+                <button class="comp-btn" data-comp="sR">R <small>+R</small></button>
+              </div>
+            </div>
+            <div class="comp-group">
+              <div class="comp-group__label">Shunt</div>
+              <div class="comp-btns">
+                <button class="comp-btn" data-comp="pL">L <small>−jB</small></button>
+                <button class="comp-btn" data-comp="pC">C <small>+jB</small></button>
+                <button class="comp-btn" data-comp="pR">R <small>+G</small></button>
+              </div>
+            </div>
+
+            <div class="comp-group">
+              <div class="comp-group__label">Through line (cascaded)</div>
+              <div class="comp-btns">
+                <button class="comp-btn" data-comp="line" style="flex: 0 0 60%;">Series line <small>rotate about Z_c</small></button>
+              </div>
+            </div>
+            <div class="comp-group">
+              <div class="comp-group__label">Shunt stub</div>
+              <div class="comp-btns">
+                <button class="comp-btn" data-comp="tpo">TL <small>open</small></button>
+                <button class="comp-btn" data-comp="tps">TL <small>short</small></button>
+              </div>
+            </div>
+
+            <div class="field-grid" style="margin-bottom: 0;">
+              <div class="field">
+                <label for="stub-zc">Line / stub Z<sub>c</sub></label>
+                <div class="input-row"><input type="number" id="stub-zc" value="50" min="1" step="1"><span class="unit">Ω</span></div>
+              </div>
+              <div class="field">
+                <label for="stub-eeff">ε<sub>eff</sub> (for length)</label>
+                <div class="input-row"><input type="number" id="stub-eeff" value="1" min="1" step="0.1"></div>
+              </div>
+            </div>
+
+            <div class="arm-hint" id="arm-hint"></div>
+
+            <div class="row-actions">
+              <button class="btn-secondary" id="btn-undo" disabled>↶ Undo</button>
+              <button class="btn-secondary" id="btn-reset" disabled>Reset</button>
             </div>
           </div>
 
-          <div class="panel readout" id="readout">
-            <p class="panel__title">Readout</p>
-            <dl class="readout__grid">
-              <dt id="row-z">z</dt>       <dd id="rd-z">—</dd>
-              <dt id="row-z-ohm">Z</dt>   <dd class="sub" id="rd-z-ohm">—</dd>
-              <dt id="row-y">y</dt>       <dd id="rd-y">—</dd>
-              <dt id="row-y-siemens">Y</dt><dd class="sub" id="rd-y-siemens">—</dd>
-              <dt>Γ</dt>                  <dd id="rd-gamma">—</dd>
-              <dt>VSWR</dt>              <dd id="rd-vswr">—</dd>
-            </dl>
-            <p id="readout-hint">Hover over the chart to read values.</p>
+          <div class="panel">
+            <p class="panel__title">Display</p>
+            <label class="switch">
+              <input type="checkbox" id="opt-readout" checked>
+              Hover readout (follows cursor)
+            </label>
+            <label class="switch">
+              <input type="checkbox" id="opt-impedance" checked>
+              <span class="swatch swatch--z"></span> Impedance grid (r, x)
+            </label>
+            <label class="switch">
+              <input type="checkbox" id="opt-admittance">
+              <span class="swatch swatch--y"></span> Admittance grid (g, b)
+            </label>
+            <label class="switch">
+              <input type="checkbox" id="opt-q">
+              <span class="swatch swatch--q"></span> Constant-Q circles
+            </label>
+            <div class="field" style="margin: 0 0 var(--space-md) 24px; max-width: 140px;">
+              <label for="opt-qval">Q value(s)</label>
+              <div class="input-row"><input type="text" id="opt-qval" value="1"></div>
+            </div>
+            <div style="margin-top: var(--space-md);">
+              <label class="field-label" for="opt-resolution">Grid resolution — <span id="resolution-label">Standard</span></label>
+              <input type="range" id="opt-resolution" min="1" max="5" step="1" value="2">
+            </div>
           </div>
         </div>
       </div>
@@ -240,6 +423,19 @@
 
     </div>
   </main>
+
+  <div class="zc-tip" id="zc-tip"></div>
+
+  <div class="hover-readout" id="hover-readout">
+    <dl class="readout__grid">
+      <dt id="row-z">z</dt>        <dd id="rd-z">—</dd>
+      <dt id="row-z-ohm">Z</dt>    <dd class="sub" id="rd-z-ohm">—</dd>
+      <dt id="row-y">y</dt>        <dd id="rd-y">—</dd>
+      <dt id="row-y-siemens">Y</dt><dd class="sub" id="rd-y-siemens">—</dd>
+      <dt>Γ</dt>                   <dd id="rd-gamma">—</dd>
+      <dt>VSWR</dt>               <dd id="rd-vswr">—</dd>
+    </dl>
+  </div>
 
   <footer class="footer">
     <p class="footer__text">&copy; 2026 Random Thoughts of a Random Guy. Built with care.</p>
