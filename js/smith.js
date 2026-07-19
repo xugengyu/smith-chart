@@ -130,66 +130,18 @@
   let panX = 0, panY = 0;       // last mouse pos in client (page) coords
   let qHotTimer = null;              // dwell timer handle
 
-  // ---------- SVG Context Mock ----------
-  class SVGContext {
-    constructor(width, height) {
-      this.width = width;
-      this.height = height;
-      this.elements = [];
-      this.path = '';
-      this.state = {
-        strokeStyle: '#000', fillStyle: '#000', lineWidth: 1, 
-        lineDash: [], globalAlpha: 1, font: '10px sans-serif',
-        textAlign: 'start', textBaseline: 'alphabetic', clipId: null
-      };
-      this.stack = [];
-      this.clipCounter = 0;
-    }
-    save() { this.stack.push(Object.assign({}, this.state)); }
-    restore() { this.state = this.stack.pop(); }
-    beginPath() { this.path = ''; }
-    moveTo(x, y) { this.path += `M ${x} ${y} `; }
-    lineTo(x, y) { this.path += `L ${x} ${y} `; }
-    arc(x, y, r, sa, ea) {
-      if (Math.abs(ea - sa - 2*Math.PI) < 0.01) {
-        this.path += `M ${x-r} ${y} a ${r} ${r} 0 1 0 ${2*r} 0 a ${r} ${r} 0 1 0 ${-2*r} 0 `;
-      }
-    }
-    stroke() {
-      if (!this.path) return;
-      let attrs = `fill="none" stroke="${this.state.strokeStyle}" stroke-width="${this.state.lineWidth}" opacity="${this.state.globalAlpha}"`;
-      if (this.state.lineDash.length) attrs += ` stroke-dasharray="${this.state.lineDash.join(',')}"`;
-      if (this.state.clipId) attrs += ` clip-path="url(#${this.state.clipId})"`;
-      this.elements.push(`<path d="${this.path}" ${attrs} />`);
-    }
-    fill() {
-      if (!this.path) return;
-      let attrs = `fill="${this.state.fillStyle}" opacity="${this.state.globalAlpha}"`;
-      if (this.state.clipId) attrs += ` clip-path="url(#${this.state.clipId})"`;
-      this.elements.push(`<path d="${this.path}" ${attrs} />`);
-    }
-    fillText(txt, x, y) {} // text omitted as requested
-    clip() {
-      this.clipCounter++;
-      const id = 'clip-' + this.clipCounter;
-      this.elements.push(`<clipPath id="${id}"><path d="${this.path}" /></clipPath>`);
-      this.state.clipId = id;
-    }
-    setLineDash(dash) { this.state.lineDash = dash; }
-    clearRect() {}
-    
-    toString() {
-      return `<svg xmlns="http://www.w3.org/2000/svg" width="${this.width}" height="${this.height}">
-        <rect width="100%" height="100%" fill="#fff" />
-        ${this.elements.join('\n')}
-      </svg>`;
-    }
-  }
-
   // ---------- Geometry ----------
   let cx = 0, cy = 0, R = 0, dpr = 1;
   function gToC(gre, gim) { return [cx + gre * R, cy - gim * R]; }
   function cToG(px, py)   { return [(px - cx) / R, (cy - py) / R]; }
+
+  // Canvas lineWidth is specified in CSS-pixel units but gets multiplied by
+  // dpr when rasterized. On a standard-DPI (dpr=1) monitor a sub-1px width
+  // (e.g. the 0.7 minor-grid lines) rasterizes as an inconsistently
+  // anti-aliased arc — solid where it happens to align to a pixel row, faint
+  // where it's split across two. Floor every stroke at ~1 physical pixel so
+  // thin grid lines look the same regardless of the monitor's dpr.
+  function crispWidth(base) { return Math.max(base, 1 / dpr); }
 
   // ---------- Complex helpers (all {re,im}) ----------
   function cAdd(a, b)  { return { re: a.re + b.re, im: a.im + b.im }; }
@@ -228,43 +180,82 @@
     return applyComp(z, comp, entry.dv);
   }
 
-  // apply any chain entry at frequency f, where entry was designed for f_design
-  function applyEntryAtFreq(z, entry, f, f_design) {
-    if (f_design <= 0) return applyEntry(z, entry);
-    const comp = COMPONENTS[entry.id];
+  // effective normalized delta (same units as entry.dv: reactance/susceptance/
+  // resistance/conductance) for a lumped or stub component at frequency f,
+  // given it was solved to realize entry.dv at f_design. Shared by the chain
+  // impedance sweep and the ABCD-based S-parameter export below.
+  function entryDeltaAtFreq(comp, entry, f, f_design) {
     const Rf = f / f_design;
-    
-    if (comp.line) {
-      return lineTransform(z, entry.theta * Rf, entry.zc / getZ0());
-    }
     if (comp.stub) {
       const theta = stubTheta(comp, entry.dv, entry.zc);
       const theta_f = theta * Rf;
       const z0 = getZ0();
-      let dv_f;
       if (comp.domain === 'z') {                 // series stub: reactance X = dv * z0
         const X_f = comp.term === 'short' ? entry.zc * Math.tan(theta_f) : -entry.zc / Math.tan(theta_f);
-        dv_f = X_f / z0;
-      } else {                                    // shunt stub: susceptance B = dv / z0
-        const B_f = comp.term === 'open' ? Math.tan(theta_f) / entry.zc : -1 / (entry.zc * Math.tan(theta_f));
-        dv_f = B_f * z0;
+        return X_f / z0;
       }
-      return applyComp(z, comp, dv_f);
+      const B_f = comp.term === 'open' ? Math.tan(theta_f) / entry.zc : -1 / (entry.zc * Math.tan(theta_f)); // shunt stub: susceptance B = dv / z0
+      return B_f * z0;
     }
-    
-    let dv_f = entry.dv;
     if (comp.domain === 'z') {
       if (comp.part === 'im') {
-        if (comp.kind === 'L') dv_f = entry.dv * Rf;
-        else if (comp.kind === 'C') dv_f = entry.dv / Rf;
+        if (comp.kind === 'L') return entry.dv * Rf;
+        if (comp.kind === 'C') return entry.dv / Rf;
       }
-    } else {
-      if (comp.part === 'im') {
-        if (comp.kind === 'C') dv_f = entry.dv * Rf;
-        else if (comp.kind === 'L') dv_f = entry.dv / Rf;
-      }
+    } else if (comp.part === 'im') {
+      if (comp.kind === 'C') return entry.dv * Rf;
+      if (comp.kind === 'L') return entry.dv / Rf;
     }
-    return applyComp(z, comp, dv_f);
+    return entry.dv; // series R / shunt G: frequency independent
+  }
+
+  // apply any chain entry at frequency f, where entry was designed for f_design
+  function applyEntryAtFreq(z, entry, f, f_design) {
+    if (f_design <= 0) return applyEntry(z, entry);
+    const comp = COMPONENTS[entry.id];
+    if (comp.line) {
+      const Rf = f / f_design;
+      return lineTransform(z, entry.theta * Rf, entry.zc / getZ0());
+    }
+    return applyComp(z, comp, entryDeltaAtFreq(comp, entry, f, f_design));
+  }
+
+  // ---------- ABCD chain matrix (for S-parameter export) ----------
+  function cMul(a, b) { return { re: a.re * b.re - a.im * b.im, im: a.re * b.im + a.im * b.re }; }
+  function cSub(a, b) { return { re: a.re - b.re, im: a.im - b.im }; }
+  const C_ONE = { re: 1, im: 0 }, C_ZERO = { re: 0, im: 0 };
+  function matMul(m1, m2) {
+    return {
+      A: cAdd(cMul(m1.A, m2.A), cMul(m1.B, m2.C)),
+      B: cAdd(cMul(m1.A, m2.B), cMul(m1.B, m2.D)),
+      C: cAdd(cMul(m1.C, m2.A), cMul(m1.D, m2.C)),
+      D: cAdd(cMul(m1.C, m2.B), cMul(m1.D, m2.D)),
+    };
+  }
+  // ABCD matrix of one chain entry at frequency f (entry designed at f_design)
+  function entryABCD(entry, f, f_design) {
+    const comp = COMPONENTS[entry.id];
+    const z0 = getZ0();
+    if (comp.line) {
+      const Rf = f_design > 0 ? f / f_design : 1;
+      const theta = entry.theta * Rf, zc = entry.zc;
+      const cosT = Math.cos(theta), sinT = Math.sin(theta);
+      return { A: { re: cosT, im: 0 }, B: { re: 0, im: zc * sinT }, C: { re: 0, im: sinT / zc }, D: { re: cosT, im: 0 } };
+    }
+    const dv_f = f_design > 0 ? entryDeltaAtFreq(comp, entry, f, f_design) : entry.dv;
+    if (comp.domain === 'z') {                  // series branch: Z = dv*z0 (real for R, reactive for L/C/stub)
+      const Z = comp.part === 're' ? { re: dv_f * z0, im: 0 } : { re: 0, im: dv_f * z0 };
+      return { A: C_ONE, B: Z, C: C_ZERO, D: C_ONE };
+    }
+    const Y = comp.part === 're' ? { re: dv_f / z0, im: 0 } : { re: 0, im: dv_f / z0 }; // shunt branch: Y = dv/z0
+    return { A: C_ONE, B: C_ZERO, C: Y, D: C_ONE };
+  }
+  // Total ABCD of the matching network alone (source side -> load side),
+  // excluding the load itself.
+  function networkABCD(f, f_design) {
+    let m = { A: C_ONE, B: C_ZERO, C: C_ZERO, D: C_ONE };
+    for (let i = comps.length - 1; i >= 0; i--) m = matMul(m, entryABCD(comps[i], f, f_design));
+    return m;
   }
 
   // ---------- Chain ----------
@@ -329,11 +320,31 @@
   }
 
   // ---------- Grid ----------
+  // Run `draw(scale)` with the canvas's ambient dpr scale-transform swapped
+  // out for the identity matrix, so it can stroke a path built directly in
+  // device pixels (multiplying its own coordinates/lineWidth/dash by `scale`)
+  // instead of relying on the CTM to do that scaling. WebKit/Safari renders
+  // circular-arc strokes under a scaled CTM with visibly inconsistent
+  // per-segment anti-aliasing — parts of the same circle render solid,
+  // parts render faint — which Chromium-based browsers don't exhibit;
+  // stroking directly in device pixels avoids it. Scoped to the persistent
+  // background grid only (gridCanvas), not the interactive hover canvas.
+  function crispStroke(ctx, draw) {
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    draw(dpr);
+    ctx.stroke();
+    ctx.restore();
+  }
   function gCircle(ctx, gcx, gcy, gr) {
     const [ccx, ccy] = gToC(gcx, gcy);
-    ctx.beginPath();
-    ctx.arc(ccx, ccy, gr * R, 0, 2 * Math.PI);
-    ctx.stroke();
+    const lw = ctx.lineWidth, dash = ctx.getLineDash ? ctx.getLineDash() : [];
+    crispStroke(ctx, function (s) {
+      ctx.lineWidth = lw * s;
+      if (dash.length) ctx.setLineDash(dash.map(function (d) { return d * s; }));
+      ctx.beginPath();
+      ctx.arc(ccx * s, ccy * s, gr * R * s, 0, 2 * Math.PI);
+    });
   }
   function clipUnit(ctx) {
     ctx.beginPath(); ctx.arc(cx, cy, R, 0, 2 * Math.PI); ctx.clip();
@@ -358,15 +369,20 @@
     
     if (chkQ.checked) drawQCircles();
 
-    gctx.save();
-    gctx.strokeStyle = COL.axis; gctx.lineWidth = 1.1;
-    gctx.beginPath(); gctx.moveTo(cx - R, cy); gctx.lineTo(cx + R, cy); gctx.stroke();
-    gctx.restore();
+    gctx.strokeStyle = COL.axis;
+    crispStroke(gctx, function (s) {
+      gctx.lineWidth = crispWidth(1.1) * s;
+      gctx.beginPath();
+      gctx.moveTo((cx - R) * s, cy * s);
+      gctx.lineTo((cx + R) * s, cy * s);
+    });
 
-    gctx.save();
-    gctx.strokeStyle = COL.outer; gctx.lineWidth = 1.6;
-    gctx.beginPath(); gctx.arc(cx, cy, R, 0, 2 * Math.PI); gctx.stroke();
-    gctx.restore();
+    gctx.strokeStyle = COL.outer;
+    crispStroke(gctx, function (s) {
+      gctx.lineWidth = crispWidth(1.6) * s;
+      gctx.beginPath();
+      gctx.arc(cx * s, cy * s, R * s, 0, 2 * Math.PI);
+    });
 
     if (chkImped.checked) drawLabels(vals, true);
     if (chkAdmit.checked) drawLabels(vals, false);
@@ -387,7 +403,7 @@
     vals.forEach(function (v) {
       const isMaj = MAJOR.has(v);
       gctx.strokeStyle = isMaj ? major : minor;
-      gctx.lineWidth = isMaj ? 1.1 : 0.7;
+      gctx.lineWidth = crispWidth(isMaj ? 1.1 : 0.7);
       gCircle(gctx, sign * (v / (1 + v)), 0, 1 / (1 + v));
       gCircle(gctx, sign * 1, sign * (1 / v), 1 / v);
       gCircle(gctx, sign * 1, sign * (-1 / v), 1 / v);
@@ -404,7 +420,7 @@
   function drawQCircles() {
     const qs = parseQ();
     gctx.save(); clipUnit(gctx);
-    gctx.strokeStyle = COL.q; gctx.lineWidth = 1; gctx.setLineDash([4, 3]);
+    gctx.strokeStyle = COL.q; gctx.lineWidth = crispWidth(1); gctx.setLineDash([4, 3]);
     qs.forEach(function (Q) {
       const rad = Math.sqrt(1 + 1 / (Q * Q));
       gCircle(gctx, 0, -1 / Q, rad);   // upper (inductive)
@@ -1251,6 +1267,108 @@
     return null;
   }
 
+  // Zin (normalized) of the load alone at frequency f, dispersive if an
+  // S-parameter file is loaded, otherwise the fixed load value.
+  function loadZAtFreq(f) {
+    const z0 = getZ0();
+    if (sParamData && sParamData.length > 0) {
+      const s11 = interpolateSParam(f);
+      const num = { re: 1 + s11.re, im: s11.im };
+      const den = { re: 1 - s11.re, im: -s11.im };
+      let zUnnorm = cDiv(num, den);
+      zUnnorm = { re: zUnnorm.re * sParamZ0, im: zUnnorm.im * sParamZ0 };
+      return { re: zUnnorm.re / z0, im: zUnnorm.im / z0 };
+    }
+    return { re: load.re, im: load.im };
+  }
+
+  // Frequency points for export sweeps: reuses the measured points when an
+  // S-parameter file is loaded, otherwise a linear sweep over the trace
+  // Fmin..Fmax range (defaulting to 0..2x the design frequency).
+  function sweepFrequencies() {
+    const f_d = getFreq();
+    const fminField = parseFloat(sparamFminIn.value) * 1e9 || 0;
+    const fmaxField = parseFloat(sparamFmaxIn.value) * 1e9;
+    if (sParamData && sParamData.length > 0) {
+      const fmax = isFinite(fmaxField) && fmaxField > fminField ? fmaxField : Infinity;
+      return sParamData.map(function (dp) { return dp.f; })
+        .filter(function (f) { return f >= fminField && f <= fmax; });
+    }
+    const fmax = isFinite(fmaxField) && fmaxField > fminField ? fmaxField : (f_d > 0 ? f_d * 2 : 1e10);
+    const N = 401, freqs = [];
+    for (let i = 0; i < N; i++) freqs.push(fminField + (fmax - fminField) * i / (N - 1));
+    return freqs;
+  }
+
+  // S11 of the complete network (matching chain + load) at each frequency,
+  // referenced to the current Z0.
+  function computeS11Sweep(freqs) {
+    const f_d = getFreq();
+    return freqs.map(function (f) {
+      let z = loadZAtFreq(f);
+      for (let i = 0; i < comps.length; i++) z = applyEntryAtFreq(z, comps[i], f, f_d);
+      return { f: f, s11: zToG(z) };
+    });
+  }
+
+  // ABCD → S (2-port, real reference Z0) for the matching network alone
+  // (load excluded — this describes the network as an insertable 2-port).
+  function abcdToS(m, z0) {
+    const Az0 = { re: m.A.re * z0, im: m.A.im * z0 };
+    const Cz02 = { re: m.C.re * z0 * z0, im: m.C.im * z0 * z0 };
+    const Dz0 = { re: m.D.re * z0, im: m.D.im * z0 };
+    const denom = cAdd(cAdd(Az0, m.B), cAdd(Cz02, Dz0));               // A*Z0 + B + C*Z0^2 + D*Z0
+    const detAD_BC = cSub(cMul(m.A, m.D), cMul(m.B, m.C));             // AD - BC
+    const s11 = cDiv(cSub(cAdd(Az0, m.B), cAdd(Cz02, Dz0)), denom);    // (AZ0+B-CZ0^2-DZ0) / denom
+    const s22 = cDiv(cAdd(cSub(m.B, Az0), cSub(Dz0, Cz02)), denom);    // (-AZ0+B-CZ0^2+DZ0) / denom
+    const s21 = cDiv({ re: 2 * z0, im: 0 }, denom);
+    const s12 = cDiv({ re: 2 * detAD_BC.re * z0, im: 2 * detAD_BC.im * z0 }, denom);
+    return { s11: s11, s21: s21, s12: s12, s22: s22 };
+  }
+
+  // 2-port S-parameters of the matching network alone (load excluded) at
+  // each frequency, referenced to the current Z0.
+  function computeS2PSweep(freqs) {
+    const f_d = getFreq(), z0 = getZ0();
+    return freqs.map(function (f) {
+      return Object.assign({ f: f }, abcdToS(networkABCD(f, f_d), z0));
+    });
+  }
+
+  // Serialize a frequency sweep as a 1-port Touchstone (.s1p) file, RI format.
+  function toS1P(sweep, z0) {
+    const lines = [
+      '! Exported from Smith Chart tool — S11 looking into the matching network + load',
+      '! ' + new Date().toISOString(),
+      '# HZ S RI R ' + z0,
+    ];
+    sweep.forEach(function (p) {
+      lines.push(p.f.toPrecision(10) + ' ' + p.s11.re.toFixed(6) + ' ' + p.s11.im.toFixed(6));
+    });
+    return lines.join('\n') + '\n';
+  }
+
+  // Serialize a frequency sweep as a 2-port Touchstone (.s2p) file, RI format.
+  // Describes the matching network alone (load excluded), as an insertable
+  // 2-port referenced to Z0 on both ports.
+  function toS2P(sweep, z0) {
+    const lines = [
+      '! Exported from Smith Chart tool — S-parameters of the matching network alone (load excluded)',
+      '! ' + new Date().toISOString(),
+      '# HZ S RI R ' + z0,
+    ];
+    sweep.forEach(function (p) {
+      lines.push([
+        p.f.toPrecision(10),
+        p.s11.re.toFixed(6), p.s11.im.toFixed(6),
+        p.s21.re.toFixed(6), p.s21.im.toFixed(6),
+        p.s12.re.toFixed(6), p.s12.im.toFixed(6),
+        p.s22.re.toFixed(6), p.s22.im.toFixed(6),
+      ].join(' '));
+    });
+    return lines.join('\n') + '\n';
+  }
+
   function syncLoad() {
     const z0 = getZ0();
     if (sParamData && sParamData.length > 0) {
@@ -1461,32 +1579,23 @@
   btnUndo.addEventListener('click', function () { comps.pop(); setArmed(null); refreshAll(); closeContextMenu(); });
   btnReset.addEventListener('click', function () { comps = []; setArmed(null); refreshAll(); closeContextMenu(); });
   btnCancel.addEventListener('click', function () { setArmed(null); closeContextMenu(); });
-  document.getElementById('btn-export-svg').addEventListener('click', function () {
-    const size = wrap.clientWidth * dpr;
-    const svgCtx = new SVGContext(size, size);
-    
-    const realGctx = gctx;
-    const realHctx = hctx;
-    
-    gctx = svgCtx;
-    hctx = svgCtx;
-    
-    drawGrid();
-    if (sParamData) drawSParamTrace();
-    drawChain();
-    
-    gctx = realGctx;
-    hctx = realHctx;
-    
-    const svgStr = svgCtx.toString();
-    const blob = new Blob([svgStr], { type: 'image/svg+xml' });
+  function downloadText(text, filename, mime) {
+    const blob = new Blob([text], { type: mime || 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'smith_chart.svg';
+    a.download = filename;
     a.click();
     URL.revokeObjectURL(url);
-    
+  }
+  document.getElementById('btn-export-s1p').addEventListener('click', function () {
+    const freqs = sweepFrequencies();
+    downloadText(toS1P(computeS11Sweep(freqs), getZ0()), 'smith_chart_network.s1p');
+    closeContextMenu();
+  });
+  document.getElementById('btn-export-s2p').addEventListener('click', function () {
+    const freqs = sweepFrequencies();
+    downloadText(toS2P(computeS2PSweep(freqs), getZ0()), 'smith_chart_network.s2p');
     closeContextMenu();
   });
   document.getElementById('btn-reset-view').addEventListener('click', function () {

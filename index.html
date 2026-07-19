@@ -8,31 +8,21 @@
   <meta name="description" content="Interactive Smith chart with a circuit builder: enter a load, add series/shunt L/C/R components, and place them by moving along constant-R/G/X/B circles.">
   <link rel="stylesheet" href="css/style.css">
   <style>
+    .smith-workspace {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-xl);
+    }
+
+    /* ---- Chart + build controls (on top) ---- */
     .smith-top {
       display: grid;
       grid-template-columns: minmax(0, 1.4fr) minmax(0, 0.6fr);
       gap: var(--space-xl);
       align-items: start;
-      max-width: var(--max-width-wide);
-      margin: 0 auto;
-    }
-    .smith-bottom {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: var(--space-xl);
-      max-width: var(--max-width-wide);
-      margin: var(--space-xl) auto 0;
     }
 
-    @media (max-width: 860px) {
-      .smith-top, .smith-bottom { grid-template-columns: 1fr; }
-    }
-
-    /* ---- Circuit view (full-width, on top) ---- */
-    .smith-circuit {
-      max-width: var(--max-width-wide);
-      margin: 0 auto var(--space-xl);
-    }
+    /* ---- Circuit view (full-width, below the chart) ---- */
     .circuit-view {
       display: flex;
       gap: var(--space-xl);
@@ -45,7 +35,9 @@
     }
     .circuit-info { flex: 0 0 240px; }
     .circuit-info .comp-list { margin-top: 0; }
-    @media (max-width: 720px) {
+
+    @media (max-width: 860px) {
+      .smith-top { grid-template-columns: 1fr; }
       .circuit-view { flex-direction: column; }
       .circuit-info { flex-basis: auto; width: 100%; }
     }
@@ -313,87 +305,89 @@
           Smith Chart</h1>
       </div>
 
-      <!-- ===== Circuit view (on top, full width) ===== -->
-      <div class="smith-circuit fade-in fade-in-delay-1">
-        <div class="panel">
-          <p class="panel__title">Circuit</p>
-          <div class="circuit-view">
-            <div class="schematic-wrap" id="schematic"></div>
-            <div class="circuit-info">
-              <div class="zin-summary" id="zin-summary"></div>
+      <div class="smith-workspace">
+
+        <!-- ===== Chart + build controls (on top) ===== -->
+        <div class="smith-top fade-in fade-in-delay-1">
+
+          <!-- Chart -->
+          <div class="chart-card">
+            <div id="chart-wrap">
+              <canvas id="grid-canvas"></canvas>
+              <canvas id="hover-canvas"></canvas>
+            </div>
+          </div>
+
+          <!-- Build controls -->
+          <div>
+            <div class="panel">
+              <p class="panel__title">Build network</p>
+
+              <div class="field-grid">
+                <div class="field" style="grid-column: 1 / -1; margin-bottom: var(--space-sm);">
+                  <label for="sparam-file">Load S-Parameter (Touchstone)</label>
+                  <div class="input-row">
+                    <input type="file" id="sparam-file" accept=".s1p,.s2p,.ts" style="padding: 3px;">
+                    <button id="btn-clear-sparam" class="btn-secondary" style="flex: 0 0 auto; padding: 4px 8px; display: none;">Clear</button>
+                  </div>
+                </div>
+                <div class="field">
+                  <label for="sparam-fmin">Trace Fmin</label>
+                  <div class="input-row">
+                    <input type="number" id="sparam-fmin" value="0" min="0" step="0.1">
+                    <span class="unit">GHz</span>
+                  </div>
+                </div>
+                <div class="field">
+                  <label for="sparam-fmax">Trace Fmax</label>
+                  <div class="input-row">
+                    <input type="number" id="sparam-fmax" value="10" min="0" step="0.1">
+                    <span class="unit">GHz</span>
+                  </div>
+                </div>
+                <div class="field">
+                  <label for="load-r">Load R</label>
+                  <div class="input-row"><input type="number" id="load-r" value="25" step="1"><span class="unit">Ω</span></div>
+                </div>
+                <div class="field">
+                  <label for="load-x">Load X</label>
+                  <div class="input-row"><input type="number" id="load-x" value="-30" step="1"><span class="unit">Ω</span></div>
+                </div>
+                <div class="field">
+                  <label for="opt-z0">Z₀</label>
+                  <div class="input-row"><input type="number" id="opt-z0" value="50" min="1" step="1"><span class="unit">Ω</span></div>
+                </div>
+                <div class="field">
+                  <label for="freq">Design Frequency</label>
+                  <div class="input-row">
+                    <input type="number" id="freq" value="2" min="0" step="0.1">
+                    <select id="freq-unit">
+                      <option value="1e3">kHz</option>
+                      <option value="1e6">MHz</option>
+                      <option value="1e9" selected>GHz</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              <div class="arm-hint" id="arm-hint"></div>
             </div>
           </div>
         </div>
-      </div>
 
-      <!-- ===== Chart + build controls ===== -->
-      <div class="smith-top fade-in fade-in-delay-2">
-
-        <!-- Chart -->
-        <div class="chart-card">
-          <div id="chart-wrap">
-            <canvas id="grid-canvas"></canvas>
-            <canvas id="hover-canvas"></canvas>
-          </div>
-        </div>
-
-        <!-- Build controls -->
-        <div>
+        <!-- ===== Circuit view (below the chart) ===== -->
+        <div class="smith-circuit fade-in fade-in-delay-2">
           <div class="panel">
-            <p class="panel__title">Build network</p>
-
-            <div class="field-grid">
-              <div class="field" style="grid-column: 1 / -1; margin-bottom: var(--space-sm);">
-                <label for="sparam-file">Load S-Parameter (Touchstone)</label>
-                <div class="input-row">
-                  <input type="file" id="sparam-file" accept=".s1p,.s2p,.ts" style="padding: 3px;">
-                  <button id="btn-clear-sparam" class="btn-secondary" style="flex: 0 0 auto; padding: 4px 8px; display: none;">Clear</button>
-                </div>
-              </div>
-              <div class="field">
-                <label for="sparam-fmin">Trace Fmin</label>
-                <div class="input-row">
-                  <input type="number" id="sparam-fmin" value="0" min="0" step="0.1">
-                  <span class="unit">GHz</span>
-                </div>
-              </div>
-              <div class="field">
-                <label for="sparam-fmax">Trace Fmax</label>
-                <div class="input-row">
-                  <input type="number" id="sparam-fmax" value="10" min="0" step="0.1">
-                  <span class="unit">GHz</span>
-                </div>
-              </div>
-              <div class="field">
-                <label for="load-r">Load R</label>
-                <div class="input-row"><input type="number" id="load-r" value="25" step="1"><span class="unit">Ω</span></div>
-              </div>
-              <div class="field">
-                <label for="load-x">Load X</label>
-                <div class="input-row"><input type="number" id="load-x" value="-30" step="1"><span class="unit">Ω</span></div>
-              </div>
-              <div class="field">
-                <label for="opt-z0">Z₀</label>
-                <div class="input-row"><input type="number" id="opt-z0" value="50" min="1" step="1"><span class="unit">Ω</span></div>
-              </div>
-              <div class="field">
-                <label for="freq">Design Frequency</label>
-                <div class="input-row">
-                  <input type="number" id="freq" value="2" min="0" step="0.1">
-                  <select id="freq-unit">
-                    <option value="1e3">kHz</option>
-                    <option value="1e6">MHz</option>
-                    <option value="1e9" selected>GHz</option>
-                  </select>
-                </div>
+            <p class="panel__title">Circuit</p>
+            <div class="circuit-view">
+              <div class="schematic-wrap" id="schematic"></div>
+              <div class="circuit-info">
+                <div class="zin-summary" id="zin-summary"></div>
               </div>
             </div>
-
-            <div class="arm-hint" id="arm-hint"></div>
           </div>
-
-
         </div>
+
       </div>
 
       <a href="https://xugengyu.github.io/paul-blog/apps.html" class="back-link">&larr; Back to Apps</a>
@@ -474,7 +468,8 @@
         <button class="btn-secondary" id="btn-reset" disabled>Reset</button>
       </div>
       <div class="row-actions" style="margin-top: 6px;">
-        <button class="btn-secondary" id="btn-export-svg" style="flex:1;">Export SVG</button>
+        <button class="btn-secondary" id="btn-export-s1p" style="flex:1;">Export S1P</button>
+        <button class="btn-secondary" id="btn-export-s2p" style="flex:1;">Export S2P</button>
       </div>
       <div class="row-actions" style="margin-top: 6px;">
         <button class="btn-secondary" id="btn-reset-view" style="flex:1;">Reset View</button>
