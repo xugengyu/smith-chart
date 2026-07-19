@@ -110,6 +110,12 @@
       font-family: var(--font-mono);
       font-size: var(--text-sm);
     }
+    .field input:disabled, .field select:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+      background: #f4f4f4;
+      color: var(--text-secondary);
+    }
     .field .unit { color: var(--text-secondary); font-family: var(--font-mono); font-size: var(--text-sm); }
 
     /* ---- Component buttons ---- */
@@ -371,7 +377,7 @@
                 <div class="input-row"><input type="number" id="opt-z0" value="50" min="1" step="1"><span class="unit">Ω</span></div>
               </div>
               <div class="field">
-                <label for="freq">Frequency</label>
+                <label for="freq">Design Frequency</label>
                 <div class="input-row">
                   <input type="number" id="freq" value="2" min="0" step="0.1">
                   <select id="freq-unit">
@@ -454,6 +460,9 @@
       <div class="row-actions" style="margin-top: 12px;">
         <button class="btn-secondary" id="btn-undo" disabled>↶ Undo</button>
         <button class="btn-secondary" id="btn-reset" disabled>Reset</button>
+      </div>
+      <div class="row-actions" style="margin-top: 6px;">
+        <button class="btn-secondary" id="btn-export-svg" style="flex:1;">Export SVG</button>
       </div>
       <div class="row-actions" style="margin-top: 6px;">
         <button class="btn-secondary" id="btn-reset-view" style="flex:1;">Reset View</button>

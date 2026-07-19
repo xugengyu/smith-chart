@@ -128,6 +128,62 @@
   let panX = 0, panY = 0;       // last mouse pos in client (page) coords
   let qHotTimer = null;              // dwell timer handle
 
+  // ---------- SVG Context Mock ----------
+  class SVGContext {
+    constructor(width, height) {
+      this.width = width;
+      this.height = height;
+      this.elements = [];
+      this.path = '';
+      this.state = {
+        strokeStyle: '#000', fillStyle: '#000', lineWidth: 1, 
+        lineDash: [], globalAlpha: 1, font: '10px sans-serif',
+        textAlign: 'start', textBaseline: 'alphabetic', clipId: null
+      };
+      this.stack = [];
+      this.clipCounter = 0;
+    }
+    save() { this.stack.push(Object.assign({}, this.state)); }
+    restore() { this.state = this.stack.pop(); }
+    beginPath() { this.path = ''; }
+    moveTo(x, y) { this.path += `M ${x} ${y} `; }
+    lineTo(x, y) { this.path += `L ${x} ${y} `; }
+    arc(x, y, r, sa, ea) {
+      if (Math.abs(ea - sa - 2*Math.PI) < 0.01) {
+        this.path += `M ${x-r} ${y} a ${r} ${r} 0 1 0 ${2*r} 0 a ${r} ${r} 0 1 0 ${-2*r} 0 `;
+      }
+    }
+    stroke() {
+      if (!this.path) return;
+      let attrs = `fill="none" stroke="${this.state.strokeStyle}" stroke-width="${this.state.lineWidth}" opacity="${this.state.globalAlpha}"`;
+      if (this.state.lineDash.length) attrs += ` stroke-dasharray="${this.state.lineDash.join(',')}"`;
+      if (this.state.clipId) attrs += ` clip-path="url(#${this.state.clipId})"`;
+      this.elements.push(`<path d="${this.path}" ${attrs} />`);
+    }
+    fill() {
+      if (!this.path) return;
+      let attrs = `fill="${this.state.fillStyle}" opacity="${this.state.globalAlpha}"`;
+      if (this.state.clipId) attrs += ` clip-path="url(#${this.state.clipId})"`;
+      this.elements.push(`<path d="${this.path}" ${attrs} />`);
+    }
+    fillText(txt, x, y) {} // text omitted as requested
+    clip() {
+      this.clipCounter++;
+      const id = 'clip-' + this.clipCounter;
+      this.elements.push(`<clipPath id="${id}"><path d="${this.path}" /></clipPath>`);
+      this.state.clipId = id;
+    }
+    setLineDash(dash) { this.state.lineDash = dash; }
+    clearRect() {}
+    
+    toString() {
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${this.width}" height="${this.height}">
+        <rect width="100%" height="100%" fill="#fff" />
+        ${this.elements.join('\n')}
+      </svg>`;
+    }
+  }
+
   // ---------- Geometry ----------
   let cx = 0, cy = 0, R = 0, dpr = 1;
   function gToC(gre, gim) { return [cx + gre * R, cy - gim * R]; }
@@ -1393,6 +1449,34 @@
   btnUndo.addEventListener('click', function () { comps.pop(); setArmed(null); refreshAll(); closeContextMenu(); });
   btnReset.addEventListener('click', function () { comps = []; setArmed(null); refreshAll(); closeContextMenu(); });
   btnCancel.addEventListener('click', function () { setArmed(null); closeContextMenu(); });
+  document.getElementById('btn-export-svg').addEventListener('click', function () {
+    const size = wrap.clientWidth * dpr;
+    const svgCtx = new SVGContext(size, size);
+    
+    const realGctx = gctx;
+    const realHctx = hctx;
+    
+    gctx = svgCtx;
+    hctx = svgCtx;
+    
+    drawGrid();
+    if (sParamData) drawSParamTrace();
+    drawChain();
+    
+    gctx = realGctx;
+    hctx = realHctx;
+    
+    const svgStr = svgCtx.toString();
+    const blob = new Blob([svgStr], { type: 'image/svg+xml' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'smith_chart.svg';
+    a.click();
+    URL.revokeObjectURL(url);
+    
+    closeContextMenu();
+  });
   document.getElementById('btn-reset-view').addEventListener('click', function () {
     zoomScale = 1;
     panX = 0;
@@ -1436,7 +1520,11 @@
     inp.addEventListener('input', function () { refreshAll(); });
   });
   z0Input.addEventListener('input', function () { syncLoad(); refreshAll(); });
-  [freqIn, freqUnit, stubZcIn, stubEeffIn].forEach(function (inp) {
+  [freqIn, freqUnit].forEach(function (inp) {
+    inp.addEventListener('input', function () { syncLoad(); refreshAll(); });
+    inp.addEventListener('change', function () { syncLoad(); refreshAll(); });
+  });
+  [stubZcIn, stubEeffIn].forEach(function (inp) {
     inp.addEventListener('input', function () { refreshAll(); });
     inp.addEventListener('change', function () { refreshAll(); });
   });
