@@ -25,6 +25,10 @@
   const loadXIn   = document.getElementById('load-x');
   const freqIn    = document.getElementById('freq');
   const freqUnit  = document.getElementById('freq-unit');
+  const sparamFileIn = document.getElementById('sparam-file');
+  const btnClearSparam = document.getElementById('btn-clear-sparam');
+  const sparamFminIn = document.getElementById('sparam-fmin');
+  const sparamFmaxIn = document.getElementById('sparam-fmax');
   const stubZcIn  = document.getElementById('stub-zc');
   const stubEeffIn= document.getElementById('stub-eeff');
   const armHint   = document.getElementById('arm-hint');
@@ -36,6 +40,9 @@
   const qValIn    = document.getElementById('opt-qval');
   const chkReadout= document.getElementById('opt-readout');
   const zcTip     = document.getElementById('zc-tip');
+  const contextMenu = document.getElementById('smith-context-menu');
+  const cmParams    = document.getElementById('cm-params');
+  const btnCancel   = document.getElementById('btn-cancel');
   const compBtns  = Array.prototype.slice.call(document.querySelectorAll('.comp-btn'));
 
   const readout = {
@@ -46,8 +53,11 @@
     yS:   document.getElementById('rd-y-siemens'),
     zRow: document.getElementById('row-z'),
     zRow2:document.getElementById('row-z-ohm'),
+    zRow2:document.getElementById('row-z-ohm'),
     yRow: document.getElementById('row-y'),
     yRow2:document.getElementById('row-y-siemens'),
+    fRow: document.getElementById('row-freq'),
+    freq: document.getElementById('rd-freq'),
     gamma:document.getElementById('rd-gamma'),
     vswr: document.getElementById('rd-vswr'),
   };
@@ -102,16 +112,21 @@
 
   // ---------- State ----------
   let load = { re: 0.5, im: -0.6 };   // normalized load impedance
-  let comps = [];                     // [{ id, dv }]
+  let sParamData = null;              // [{f, s11: {re, im}}]
+  let sParamZ0 = 50;                  // reference impedance of the touchstone file
+  let sParamTracePts = [];            // [{f, z, px, py}] cached trace points
+  let comps = [];                     // [{ id, dv, theta, zc }]
   let armedId = null;                 // component id currently armed for placement
-  let preview = null;                 // { dv, zNew } during arming
-  let lastMouse = null;               // last mouse pos in canvas coords
-  let lastClient = null;              // last mouse pos in client (page) coords
-  let dragging = null;                // { index } — editing a placed component's node
-  let qHoverIndex = -1;              // Q value index under cursor (pending 3s dwell)
-  let qHotIndex = -1;                // Q value index activated for scroll
+  let preview = null;                 // { id, dv, theta, zNew, sol, zc_val, zc, zcn }
+  let dragging = null;                // null or { load:true } or { index:i }
+  let lastMouse = null;               // {x,y} in canvas coords
+  let lastClient = null;              // {x,y} screen coords for tooltip
+  let traceHotIndex = -1;             // hovered trace index
+  let qHoverIndex = -1;               // hovered Q circle index
+  let qHotIndex = -1;                 // clicked/grabbed Q circle index
+  let zoomScale = 1;
+  let panX = 0, panY = 0;       // last mouse pos in client (page) coords
   let qHotTimer = null;              // dwell timer handle
-  let traceHotIndex = -1;           // component whose trace is under the cursor
 
   // ---------- Geometry ----------
   let cx = 0, cy = 0, R = 0, dpr = 1;
@@ -153,6 +168,42 @@
     const comp = COMPONENTS[entry.id];
     if (comp.line) return lineTransform(z, entry.theta, entry.zc / getZ0());
     return applyComp(z, comp, entry.dv);
+  }
+
+  // apply any chain entry at frequency f, where entry was designed for f_design
+  function applyEntryAtFreq(z, entry, f, f_design) {
+    if (f_design <= 0) return applyEntry(z, entry);
+    const comp = COMPONENTS[entry.id];
+    const Rf = f / f_design;
+    
+    if (comp.line) {
+      return lineTransform(z, entry.theta * Rf, entry.zc / getZ0());
+    }
+    if (comp.stub) {
+      const theta = stubTheta(comp, entry.dv, entry.zc);
+      const theta_f = theta * Rf;
+      let B_f = 0;
+      if (comp.term === 'open') {
+        B_f = Math.tan(theta_f) / entry.zc;
+      } else {
+        B_f = -1 / (entry.zc * Math.tan(theta_f));
+      }
+      return applyComp(z, comp, B_f * getZ0());
+    }
+    
+    let dv_f = entry.dv;
+    if (comp.domain === 'z') {
+      if (comp.part === 'im') {
+        if (comp.kind === 'L') dv_f = entry.dv * Rf;
+        else if (comp.kind === 'C') dv_f = entry.dv / Rf;
+      }
+    } else {
+      if (comp.part === 'im') {
+        if (comp.kind === 'C') dv_f = entry.dv * Rf;
+        else if (comp.kind === 'L') dv_f = entry.dv / Rf;
+      }
+    }
+    return applyComp(z, comp, dv_f);
   }
 
   // ---------- Chain ----------
@@ -204,7 +255,14 @@
       c.getContext('2d').setTransform(dpr, 0, 0, dpr, 0, 0);
     });
     const pad = 26;
-    cx = size / 2; cy = size / 2; R = size / 2 - pad;
+    const baseR = size / 2 - pad;
+    const baseCx = size / 2;
+    const baseCy = size / 2;
+    
+    R = baseR * zoomScale;
+    cx = baseCx + panX;
+    cy = baseCy + panY;
+    
     drawGrid();
     renderOverlay(null);
   }
@@ -228,8 +286,15 @@
     gctx.restore();
 
     const vals = RES_LEVELS[parseInt(resSlider.value, 10) - 1];
-    if (chkAdmit.checked) drawFamily(vals, false);
-    if (chkImped.checked) drawFamily(vals, true);
+    
+    // Draw faint grid everywhere (outside included)
+    if (chkAdmit.checked) drawFamily(vals, false, true);
+    if (chkImped.checked) drawFamily(vals, true, true);
+    
+    // Draw normal grid inside unit circle (overwrites faint)
+    if (chkAdmit.checked) drawFamily(vals, false, false);
+    if (chkImped.checked) drawFamily(vals, true, false);
+    
     if (chkQ.checked) drawQCircles();
 
     gctx.save();
@@ -246,11 +311,18 @@
     if (chkAdmit.checked) drawLabels(vals, false);
   }
 
-  function drawFamily(vals, isImped) {
+  function drawFamily(vals, isImped, isFaint) {
     const sign = isImped ? 1 : -1;
     const major = isImped ? COL.imped : COL.admit;
     const minor = isImped ? COL.impedMinor : COL.admitMinor;
-    gctx.save(); clipUnit(gctx);
+    gctx.save();
+    
+    if (isFaint) {
+      gctx.globalAlpha = 0.15;
+    } else {
+      clipUnit(gctx);
+    }
+    
     vals.forEach(function (v) {
       const isMaj = MAJOR.has(v);
       gctx.strokeStyle = isMaj ? major : minor;
@@ -451,6 +523,44 @@
     });
   }
 
+  function drawSParamTrace() {
+    sParamTracePts = [];
+    if (!sParamData || sParamData.length === 0) return;
+    const z0 = getZ0();
+    const f_d = getFreq();
+    const fmin = parseFloat(sparamFminIn.value) * 1e9 || 0;
+    const fmax = parseFloat(sparamFmaxIn.value) * 1e9 || Infinity;
+    const gpts = [];
+    const rawGpts = [];
+    const isTransformed = comps.length > 0 || (armedId && preview);
+    sParamData.forEach(function(dp) {
+      if (dp.f < fmin || dp.f > fmax) return;
+      const s11 = dp.s11;
+      const num = { re: 1 + s11.re, im: s11.im };
+      const den = { re: 1 - s11.re, im: -s11.im };
+      let zUnnorm = cDiv(num, den);
+      zUnnorm = { re: zUnnorm.re * sParamZ0, im: zUnnorm.im * sParamZ0 };
+      let zNorm = { re: zUnnorm.re / z0, im: zUnnorm.im / z0 };
+      
+      if (isTransformed) rawGpts.push(zToG(zNorm));
+
+      for (let i = 0; i < comps.length; i++) {
+        zNorm = applyEntryAtFreq(zNorm, comps[i], dp.f, f_d);
+      }
+      if (armedId && preview) {
+        zNorm = applyEntryAtFreq(zNorm, preview, dp.f, f_d);
+      }
+      const g = zToG(zNorm);
+      gpts.push(g);
+      const [px, py] = gToC(g.re, g.im);
+      sParamTracePts.push({ f: dp.f, z: zNorm, px: px, py: py });
+    });
+    if (isTransformed) {
+      polyline(rawGpts, 'rgba(100,100,100,0.3)', 1.5, [4, 4]);
+    }
+    polyline(gpts, 'rgba(100,100,100,0.6)', 2);
+  }
+
   // component index whose trace polyline passes within `tol` px of the mouse, else -1
   function traceAt(mouse, tol) {
     let z = { re: load.re, im: load.im }, best = -1, bestD = tol || 6;
@@ -475,10 +585,15 @@
   function renderOverlay(mouse) {
     clearHover();
 
-    if (dragging && mouse) { drawEditing(mouse); return; }  // mutates chain, draws its own
+    if (dragging && mouse) { drawEditing(mouse); return; }
 
+    preview = null;
+    if (armedId && mouse) calcPreview(mouse);
+
+    if (sParamData) drawSParamTrace();
     drawChain();
-    if (armedId && mouse) { drawArmed(mouse); return; }
+    
+    if (armedId && mouse) { drawArmedVisuals(mouse); return; }
     if (!armedId && mouse) { drawInspect(mouse); drawQHighlight(); return; }
 
     drawQHighlight();
@@ -514,24 +629,33 @@
   }
 
   // ---------- Armed placement (append a new component) ----------
-  function drawArmed(mouse) {
+  function calcPreview(mouse) {
+    if (!armedId) return;
     const comp = COMPONENTS[armedId];
     const zc = currentZ();
     if (comp.line) {
       const zcn = currentStubParams().zc / getZ0();
       const sol = solveParam(comp, zc, mouse, currentStubParams().zc);
       const zNew = lineTransform(zc, sol.theta, zcn);
-      preview = { line: true, theta: sol.theta, zNew: zNew };
-      drawLineLocus(zc, zcn);
-      polyline(pathLine(zc, sol.theta, zcn), COL.preview, 2.5);
-      dot(zToG(zNew), COL.preview, 5);
+      preview = { id: armedId, line: true, theta: sol.theta, zNew: zNew, sol: sol, zcn: zcn, zc_val: zc, zc: currentStubParams().zc };
     } else {
       const sol = solveParam(comp, zc, mouse);
       const zNew = applyComp(zc, comp, sol.dv);
-      preview = { dv: sol.dv, zNew: zNew };
-      drawConstraintCircle(sol.con);
-      polyline(pathGamma(zc, comp, sol.dv), COL.preview, 2.5);
-      dot(zToG(zNew), COL.preview, 5);
+      preview = { id: armedId, dv: sol.dv, zNew: zNew, sol: sol, zc_val: zc };
+    }
+  }
+
+  function drawArmedVisuals(mouse) {
+    if (!armedId || !preview) return;
+    const comp = COMPONENTS[armedId];
+    if (comp.line) {
+      drawLineLocus(preview.zc_val, preview.zcn);
+      polyline(pathLine(preview.zc_val, preview.theta, preview.zcn), COL.preview, 2.5);
+      dot(zToG(preview.zNew), COL.preview, 5);
+    } else {
+      drawConstraintCircle(preview.sol.con);
+      polyline(pathGamma(preview.zc_val, comp, preview.dv), COL.preview, 2.5);
+      dot(zToG(preview.zNew), COL.preview, 5);
     }
     updateReadout(preview.zNew, true);
     updateArmHint(comp);
@@ -549,6 +673,8 @@
     if (comp.line) entry.theta = sol.theta;
     else entry.dv = sol.dv;
 
+    if (sParamData) drawSParamTrace();
+
     drawChain();                                   // reflects the edited value
     if (comp.line) drawLineLocus(zIn, entry.zc / getZ0());
     else drawConstraintCircle(sol.con);
@@ -560,7 +686,7 @@
     armHint.classList.add('show');
     const cv = compValue(comp, entry.dv, entry);
     let head = '<b>Editing ' + comp.name + '</b>';
-    if (compUsesZc(entry.id)) head += ' · Z<sub>c</sub>=' + fmtZc(entry.zc) + 'Ω (scroll to change)';
+    if (compUsesZc(entry.id)) head += ' · Z<sub>c</sub>=' + fmtZc(entry.zc) + 'Ω';
     armHint.innerHTML = head + ' · drag to change · <b>' + cv.text + '</b>';
 
     renderSchematic();
@@ -569,6 +695,11 @@
 
   // dragging the load node: set Z_L directly from the cursor (clamped inside |Γ|=1)
   function drawEditingLoad(mouse) {
+    if (sParamData) {
+      armHint.classList.add('show');
+      armHint.innerHTML = '<b>Cannot drag load</b> · Clear S-parameter file first.';
+      return;
+    }
     let g = cToG(mouse.x, mouse.y);
     let gre = g[0], gim = g[1];
     const rho = Math.hypot(gre, gim);
@@ -591,10 +722,33 @@
   }
 
   // ---------- Inspect (nothing armed) ----------
+  function snapToTrace(mouse) {
+    if (!sParamTracePts || sParamTracePts.length === 0) return null;
+    let best = null, bestD = 10;
+    for (let i = 0; i < sParamTracePts.length; i++) {
+      const p = sParamTracePts[i];
+      const d = Math.hypot(p.px - mouse.x, p.py - mouse.y);
+      if (d < bestD) { bestD = d; best = p; }
+    }
+    return best;
+  }
+
   function drawInspect(mouse) {
-    const [gre, gim] = cToG(mouse.x, mouse.y);
-    const rho = Math.hypot(gre, gim);
-    if (rho > 1.0001) { updateReadout(null, false); return; }
+    const snap = snapToTrace(mouse);
+    let z, gre, gim, rho, f = null;
+    if (snap) {
+      z = snap.z;
+      f = snap.f;
+      const g = zToG(z);
+      gre = g.re; gim = g.im;
+      rho = Math.hypot(gre, gim);
+    } else {
+      const gc = cToG(mouse.x, mouse.y);
+      gre = gc[0]; gim = gc[1];
+      rho = Math.hypot(gre, gim);
+      if (rho > 1.0001) { updateReadout(null, false, null); return; }
+      z = gToZ({ re: gre, im: gim });
+    }
 
     const [sx, sy] = gToC(gre, gim);
     hctx.save(); clipUnit(hctx);
@@ -606,9 +760,9 @@
     hctx.strokeStyle = COL.crosshair; hctx.lineWidth = 1;
     hctx.beginPath(); hctx.moveTo(cx, cy); hctx.lineTo(sx, sy); hctx.stroke();
     hctx.restore();
-    dot({ re: gre, im: gim }, COL.point, 3.5);
+    dot({ re: gre, im: gim }, snap ? COL.preview : COL.point, snap ? 5 : 3.5);
 
-    updateReadout(gToZ({ re: gre, im: gim }), true);
+    updateReadout(z, true, f);
   }
 
   // ---------- Readout ----------
@@ -625,7 +779,7 @@
     return fmt(re) + (im >= 0 ? ' + j' : ' − j') + fmt(Math.abs(im));
   }
   function fmtN(n) { return !isFinite(n) ? '∞' : String(Math.round(n * 100) / 100); }
-  function updateReadout(z, active) {
+  function updateReadout(z, active, f) {
     if (!z || !active || !chkReadout.checked) { readout.box.style.display = 'none'; return; }
     readout.box.style.display = 'block';
     positionReadout();
@@ -635,6 +789,15 @@
     const rho = Math.hypot(g.re, g.im);
     const vswr = rho >= 1 ? Infinity : (1 + rho) / (1 - rho);
     const y = cInv(z);
+
+    if (f != null && readout.fRow && readout.freq) {
+      readout.fRow.style.display = '';
+      readout.freq.style.display = '';
+      readout.freq.textContent = engFmt(f, [[1e9, 1e9, 'GHz'], [1e6, 1e6, 'MHz'], [1e3, 1e3, 'kHz'], [0, 1, 'Hz']]);
+    } else if (readout.fRow && readout.freq) {
+      readout.fRow.style.display = 'none';
+      readout.freq.style.display = 'none';
+    }
 
     readout.gamma.textContent = fmt(rho) + ' ∠ ' + (Math.atan2(g.im, g.re) * 180 / Math.PI).toFixed(1) + '°';
     readout.vswr.textContent = isFinite(vswr) ? fmt(vswr) + ' : 1' : '∞ : 1';
@@ -959,12 +1122,90 @@
     refreshAll();
   }
 
-  // ---------- Load ----------
+  // ---------- S-Parameter Import & Load ----------
+  function parseTouchstone(text) {
+    const lines = text.split('\n');
+    let freqMult = 1e9;
+    let format = 'MA';
+    let z0 = 50;
+    const data = [];
+    for (let i = 0; i < lines.length; i++) {
+      let line = lines[i].trim();
+      if (!line || line.startsWith('!')) continue;
+      if (line.startsWith('#')) {
+        const parts = line.substring(1).trim().split(/\s+/).map(function(s){ return s.toUpperCase(); });
+        if (parts.indexOf('HZ') >= 0) freqMult = 1;
+        else if (parts.indexOf('KHZ') >= 0) freqMult = 1e3;
+        else if (parts.indexOf('MHZ') >= 0) freqMult = 1e6;
+        else if (parts.indexOf('GHZ') >= 0) freqMult = 1e9;
+        if (parts.indexOf('MA') >= 0) format = 'MA';
+        else if (parts.indexOf('DB') >= 0) format = 'DB';
+        else if (parts.indexOf('RI') >= 0) format = 'RI';
+        const rIdx = parts.indexOf('R');
+        if (rIdx >= 0 && rIdx + 1 < parts.length) z0 = parseFloat(parts[rIdx + 1]);
+        continue;
+      }
+      const parts = line.split(/\s+/).filter(function(s){ return s; });
+      if (parts.length >= 3) {
+        const f = parseFloat(parts[0]) * freqMult;
+        const p1 = parseFloat(parts[1]);
+        const p2 = parseFloat(parts[2]);
+        let s11 = { re: 0, im: 0 };
+        if (format === 'MA') {
+          const ang = p2 * Math.PI / 180;
+          s11 = { re: p1 * Math.cos(ang), im: p1 * Math.sin(ang) };
+        } else if (format === 'DB') {
+          const mag = Math.pow(10, p1 / 20);
+          const ang = p2 * Math.PI / 180;
+          s11 = { re: mag * Math.cos(ang), im: mag * Math.sin(ang) };
+        } else if (format === 'RI') {
+          s11 = { re: p1, im: p2 };
+        }
+        data.push({ f: f, s11: s11 });
+      }
+    }
+    data.sort(function(a, b) { return a.f - b.f; });
+    return { z0: z0, data: data };
+  }
+
+  function interpolateSParam(freq) {
+    if (!sParamData || sParamData.length === 0) return null;
+    if (freq <= sParamData[0].f) return sParamData[0].s11;
+    if (freq >= sParamData[sParamData.length - 1].f) return sParamData[sParamData.length - 1].s11;
+    for (let i = 0; i < sParamData.length - 1; i++) {
+      if (freq >= sParamData[i].f && freq <= sParamData[i + 1].f) {
+        const f0 = sParamData[i].f, f1 = sParamData[i + 1].f;
+        const s0 = sParamData[i].s11, s1 = sParamData[i + 1].s11;
+        const t = (freq - f0) / (f1 - f0);
+        return { re: s0.re + t * (s1.re - s0.re), im: s0.im + t * (s1.im - s0.im) };
+      }
+    }
+    return null;
+  }
+
   function syncLoad() {
     const z0 = getZ0();
-    const r = (parseFloat(loadRIn.value) || 0) / z0;
-    const x = (parseFloat(loadXIn.value) || 0) / z0;
-    load = { re: r, im: x };
+    if (sParamData && sParamData.length > 0) {
+      const freq = getFreq();
+      const s11 = interpolateSParam(freq);
+      if (s11) {
+        const num = { re: 1 + s11.re, im: s11.im };
+        const den = { re: 1 - s11.re, im: -s11.im };
+        let zUnnorm = cDiv(num, den);
+        zUnnorm = { re: zUnnorm.re * sParamZ0, im: zUnnorm.im * sParamZ0 };
+        load = { re: zUnnorm.re / z0, im: zUnnorm.im / z0 };
+        loadRIn.value = fmtN(zUnnorm.re);
+        loadXIn.value = fmtN(zUnnorm.im);
+        loadRIn.disabled = true;
+        loadXIn.disabled = true;
+      }
+    } else {
+      const r = (parseFloat(loadRIn.value) || 0) / z0;
+      const x = (parseFloat(loadXIn.value) || 0) / z0;
+      load = { re: r, im: x };
+      loadRIn.disabled = false;
+      loadXIn.disabled = false;
+    }
   }
 
   // ---------- Cursor tooltip ----------
@@ -1023,14 +1264,56 @@
   function setTraceHot(idx) { if (idx !== traceHotIndex) { traceHotIndex = idx; setSchematicHot(idx); } }
 
   // ---------- Events ----------
+  function closeContextMenu() {
+    contextMenu.style.display = 'none';
+  }
+
+  document.addEventListener('click', function(e) {
+    if (!contextMenu.contains(e.target)) {
+      closeContextMenu();
+    }
+  });
+
+  hoverCanvas.addEventListener('contextmenu', function (e) {
+    e.preventDefault();
+    closeContextMenu();
+    
+    btnUndo.disabled = comps.length === 0;
+    btnReset.disabled = comps.length === 0;
+
+    if (armedId && compUsesZc(armedId)) {
+      cmParams.style.display = 'block';
+    } else {
+      cmParams.style.display = 'none';
+    }
+
+    contextMenu.style.display = 'block';
+    contextMenu.style.left = e.clientX + 'px';
+    contextMenu.style.top = e.clientY + 'px';
+    
+    // adjust if it goes offscreen
+    const rect = contextMenu.getBoundingClientRect();
+    if (rect.right > window.innerWidth) contextMenu.style.left = (window.innerWidth - rect.width - 10) + 'px';
+    if (rect.bottom > window.innerHeight) contextMenu.style.top = (window.innerHeight - rect.height - 10) + 'px';
+  });
+
   hoverCanvas.addEventListener('mousemove', function (e) {
     const rect = hoverCanvas.getBoundingClientRect();
     lastMouse = { x: e.clientX - rect.left, y: e.clientY - rect.top };
     lastClient = { x: e.clientX, y: e.clientY };
+
+    if (dragging && dragging.pan) {
+      panX = dragging.startPanX + (lastMouse.x - dragging.startX);
+      panY = dragging.startPanY + (lastMouse.y - dragging.startY);
+      resize();
+      return;
+    }
+
     if (!dragging && !armedId) { handleQDwell(lastMouse); setTraceHot(traceAt(lastMouse, 6)); }
     else setTraceHot(-1);
+    
     renderOverlay(lastMouse);
-    hoverCanvas.style.cursor = dragging ? 'grabbing' : armedId ? 'pointer'
+    hoverCanvas.style.cursor = (dragging && dragging.pan) ? 'grabbing' : dragging ? 'grabbing' : armedId ? 'pointer'
       : (hitNode(lastMouse) ? 'grab' : traceHotIndex >= 0 ? 'pointer' : 'crosshair');
     refreshTip(e.clientX, e.clientY);
   });
@@ -1050,67 +1333,107 @@
       lastMouse = m; lastClient = { x: e.clientX, y: e.clientY };
       renderOverlay(m);
       refreshTip(e.clientX, e.clientY);
+    } else {
+      // Initiate pan
+      dragging = { pan: true, startX: m.x, startY: m.y, startPanX: panX, startPanY: panY };
+      hoverCanvas.style.cursor = 'grabbing';
     }
   });
   window.addEventListener('mouseup', function () {
     if (dragging) {
       dragging = null;
       armHint.classList.remove('show');
-      hoverCanvas.style.cursor = 'crosshair';
+      hoverCanvas.style.cursor = armedId ? 'pointer' : 'crosshair';
       hideTip();
       refreshAll();
     }
   });
-  hoverCanvas.addEventListener('click', function () { if (armedId) commitPreview(); });
+  hoverCanvas.addEventListener('click', function (e) {
+    if (contextMenu.style.display === 'block') return;
+    if (armedId) commitPreview(); 
+  });
   hoverCanvas.addEventListener('wheel', function (e) {
-    const st = e.deltaY < 0 ? 1 : -1;
-    // 1) editing a placed transmission-line node
-    if (dragging && dragging.index != null && compUsesZc(comps[dragging.index].id)) {
-      e.preventDefault();
-      const entry = comps[dragging.index];
-      entry.zc = Math.max(1, Math.min(1000, Math.round(entry.zc + st * (e.shiftKey ? 1 : 5))));
-      if (lastMouse) renderOverlay(lastMouse);
-      refreshTip(e.clientX, e.clientY);
-      return;
-    }
-    // 2) arming a new transmission-line element
-    if (armedId && compUsesZc(armedId)) {
-      e.preventDefault();
-      let zc = parseFloat(stubZcIn.value) || getZ0();
-      zc = Math.max(1, Math.min(1000, Math.round(zc + st * (e.shiftKey ? 1 : 5))));
-      stubZcIn.value = zc;
-      if (lastMouse) renderOverlay(lastMouse);
-      refreshTip(e.clientX, e.clientY);
-      return;
-    }
-    // 3) a grabbed constant-Q circle
-    if (qHotIndex >= 0) {
-      e.preventDefault();
-      const qs = parseQ();
-      if (qs[qHotIndex] != null) {
-        let q = qs[qHotIndex] + st * (e.shiftKey ? 0.1 : 0.5);
-        qs[qHotIndex] = Math.max(0.1, Math.round(q * 10) / 10);
-        qValIn.value = qs.join(', ');
-        drawGrid();
-        if (lastMouse) renderOverlay(lastMouse);
-        refreshTip(e.clientX, e.clientY);
-      }
-      return;
-    }
+    e.preventDefault();
+    const zoomFactor = e.deltaY < 0 ? 1.1 : (1 / 1.1);
+    
+    const rect = hoverCanvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    
+    const gre = (mx - cx) / R;
+    const gim = (cy - my) / R;
+    
+    zoomScale *= zoomFactor;
+    zoomScale = Math.max(0.5, Math.min(50, zoomScale));
+    
+    const size = wrap.clientWidth;
+    const pad = 26;
+    const baseR = size / 2 - pad;
+    const baseCx = size / 2;
+    const baseCy = size / 2;
+    
+    const newR = baseR * zoomScale;
+    const newCx = mx - gre * newR;
+    const newCy = my + gim * newR;
+    
+    panX = newCx - baseCx;
+    panY = newCy - baseCy;
+    
+    resize();
   }, { passive: false });
 
   compBtns.forEach(function (b) {
     b.addEventListener('click', function () {
       setArmed(armedId === b.dataset.comp ? null : b.dataset.comp);
+      closeContextMenu();
     });
   });
-  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') setArmed(null); });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { setArmed(null); closeContextMenu(); } });
 
-  btnUndo.addEventListener('click', function () { comps.pop(); setArmed(null); refreshAll(); });
-  btnReset.addEventListener('click', function () { comps = []; setArmed(null); refreshAll(); });
+  btnUndo.addEventListener('click', function () { comps.pop(); setArmed(null); refreshAll(); closeContextMenu(); });
+  btnReset.addEventListener('click', function () { comps = []; setArmed(null); refreshAll(); closeContextMenu(); });
+  btnCancel.addEventListener('click', function () { setArmed(null); closeContextMenu(); });
+  document.getElementById('btn-reset-view').addEventListener('click', function () {
+    zoomScale = 1;
+    panX = 0;
+    panY = 0;
+    resize();
+    closeContextMenu();
+  });
+
+  sparamFileIn.addEventListener('change', function(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(ev) {
+      const res = parseTouchstone(ev.target.result);
+      if (res.data.length > 0) {
+        sParamZ0 = res.z0;
+        sParamData = res.data;
+        btnClearSparam.style.display = 'inline-block';
+        syncLoad();
+        refreshAll();
+      } else {
+        alert('Could not parse valid S-parameter data from this file.');
+      }
+    };
+    reader.readAsText(file);
+  });
+
+  btnClearSparam.addEventListener('click', function() {
+    sParamData = null;
+    sparamFileIn.value = '';
+    btnClearSparam.style.display = 'none';
+    syncLoad();
+    refreshAll();
+  });
 
   [loadRIn, loadXIn].forEach(function (inp) {
     inp.addEventListener('input', function () { syncLoad(); refreshAll(); });
+  });
+  
+  [sparamFminIn, sparamFmaxIn].forEach(function (inp) {
+    inp.addEventListener('input', function () { refreshAll(); });
   });
   z0Input.addEventListener('input', function () { syncLoad(); refreshAll(); });
   [freqIn, freqUnit, stubZcIn, stubEeffIn].forEach(function (inp) {
