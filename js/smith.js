@@ -79,6 +79,7 @@
     freq: document.getElementById('rd-freq'),
     gamma:document.getElementById('rd-gamma'),
     vswr: document.getElementById('rd-vswr'),
+    rl:   document.getElementById('rd-rl'),
   };
 
   // ---------- Colours ----------
@@ -620,28 +621,56 @@
 
   function drawSParamTrace() {
     sParamTracePts = [];
-    if (!sParamData || sParamData.length === 0) {
-      if (typeof drawS11Plot === 'function') drawS11Plot();
-      return;
-    }
-    const z0 = getZ0();
+    const isTransformed = comps.length > 0 || (armedId && preview);
     const f_d = getFreq();
     const fmin = parseFloat(sparamFminIn.value) * 1e9 || 0;
-    const fmax = parseFloat(sparamFmaxIn.value) * 1e9 || Infinity;
+    const fmaxIn = parseFloat(sparamFmaxIn.value) * 1e9;
+    const fmax = isNaN(fmaxIn) ? Infinity : fmaxIn;
+
+    let sweepData = sParamData;
+    if (!sweepData || sweepData.length === 0) {
+      if (!isTransformed) {
+        if (typeof drawS11Plot === 'function') drawS11Plot();
+        return;
+      }
+      sweepData = [];
+      const numPts = 101;
+      const actualFmax = isFinite(fmax) ? fmax : (fmin > 0 ? fmin * 2 : (f_d > 0 ? f_d * 2 : 2e9));
+      for (let i = 0; i < numPts; i++) {
+        const f = fmin + (actualFmax - fmin) * (i / (numPts - 1));
+        sweepData.push({ f: f, isSynthetic: true });
+      }
+    }
+
+    const z0 = getZ0();
     const gpts = [];
     const rawGpts = [];
-    const isTransformed = comps.length > 0 || (armedId && preview);
-    sParamData.forEach(function(dp) {
+    
+    sweepData.forEach(function(dp) {
       if (dp.f < fmin || dp.f > fmax) return;
-      const s11 = portRefl(dp);
-      const num = { re: 1 + s11.re, im: s11.im };
-      const den = { re: 1 - s11.re, im: -s11.im };
-      let zUnnorm = cDiv(num, den);
-      zUnnorm = { re: zUnnorm.re * sParamZ0, im: zUnnorm.im * sParamZ0 };
-      let zNorm = { re: zUnnorm.re / z0, im: zUnnorm.im / z0 };
-      const rawG = zToG(zNorm);
-      const [rawPx, rawPy] = gToC(rawG.re, rawG.im);
-      if (isTransformed) rawGpts.push(rawG);
+      
+      let zNorm;
+      let rawG;
+      let rawPx, rawPy;
+      
+      if (dp.isSynthetic) {
+        zNorm = { re: load.re, im: load.im };
+        rawG = zToG(zNorm);
+        const pt = gToC(rawG.re, rawG.im);
+        rawPx = pt[0]; rawPy = pt[1];
+      } else {
+        const s11 = portRefl(dp);
+        const num = { re: 1 + s11.re, im: s11.im };
+        const den = { re: 1 - s11.re, im: -s11.im };
+        let zUnnorm = cDiv(num, den);
+        zUnnorm = { re: zUnnorm.re * sParamZ0, im: zUnnorm.im * sParamZ0 };
+        zNorm = { re: zUnnorm.re / z0, im: zUnnorm.im / z0 };
+        rawG = zToG(zNorm);
+        const pt = gToC(rawG.re, rawG.im);
+        rawPx = pt[0]; rawPy = pt[1];
+      }
+      
+      if (isTransformed && !dp.isSynthetic) rawGpts.push(rawG);
 
       for (let i = 0; i < comps.length; i++) {
         zNorm = applyEntryAtFreq(zNorm, comps[i], dp.f, f_d);
@@ -689,8 +718,11 @@
       return;
     }
     
+    const f_d = getFreq();
     const fmin = parseFloat(sparamFminIn.value) * 1e9 || 0;
-    const fmax = parseFloat(sparamFmaxIn.value) * 1e9 || 0;
+    const fmaxIn = parseFloat(sparamFmaxIn.value) * 1e9;
+    const fmax = isFinite(fmaxIn) && fmaxIn > 0 ? fmaxIn : (fmin > 0 ? fmin * 2 : (f_d > 0 ? f_d * 2 : 2e9));
+    
     if (fmin >= fmax) return;
     
     const yMin = s11YMin;
@@ -868,7 +900,7 @@
     // Resizing a target or Q circle: keep the normal chart drawn underneath so the
     // user can see the chain/trace they're sizing the circle against.
     if (dragging && (dragging.target != null || dragging.qIndex != null)) {
-      if (sParamData) drawSParamTrace();
+      drawSParamTrace();
       drawChain();
       if (mouse) drawInspect(mouse);
       return;
@@ -879,7 +911,7 @@
     preview = null;
     if (armedId && mouse) calcPreview(mouse);
 
-    if (sParamData) drawSParamTrace();
+    drawSParamTrace();
     drawChain();
     
     if (armedId && mouse) { drawArmedVisuals(mouse); return; }
@@ -963,7 +995,7 @@
     if (comp.line) entry.theta = sol.theta;
     else entry.dv = sol.dv;
 
-    if (sParamData) drawSParamTrace();
+    drawSParamTrace();
 
     drawChain();                                   // reflects the edited value
     if (comp.line) drawLineLocus(zIn, entry.zc / getZ0());
@@ -1134,6 +1166,7 @@
 
     readout.gamma.textContent = fmt(rho) + ' ∠ ' + (Math.atan2(g.im, g.re) * 180 / Math.PI).toFixed(1) + '°';
     readout.vswr.textContent = isFinite(vswr) ? fmt(vswr) + ' : 1' : '∞ : 1';
+    readout.rl.textContent = rhoToDb(rho).toFixed(2) + ' dB';
 
     const showZ = chkImped.checked, showY = chkAdmit.checked;
     setRow(readout.zRow, readout.z, showZ);
@@ -1949,7 +1982,7 @@
     if (!dragging && !armedId) { handleTargetDwell(lastMouse); handleQDwell(lastMouse); setTraceHot(traceAt(lastMouse, 6)); }
     else setTraceHot(-1);
 
-    renderOverlay(lastMouse);
+    scheduleRender();
     hoverCanvas.style.cursor = (dragging && dragging.pan) ? 'grabbing' : dragging ? 'grabbing' : armedId ? 'pointer'
       : (hitNode(lastMouse) ? 'grab' : tgtHotIndex >= 0 ? 'grab' : traceHotIndex >= 0 ? 'pointer' : 'crosshair');
     refreshTip(e.clientX, e.clientY);
