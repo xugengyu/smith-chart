@@ -27,6 +27,9 @@
   const freqUnit  = document.getElementById('freq-unit');
   const sparamFileIn = document.getElementById('sparam-file');
   const btnClearSparam = document.getElementById('btn-clear-sparam');
+  const sparamPortField = document.getElementById('sparam-port-field');
+  const sparamPortSel = document.getElementById('sparam-port');
+  const circuitPortLabel = document.getElementById('circuit-port-label');
   const sparamFminIn = document.getElementById('sparam-fmin');
   const sparamFmaxIn = document.getElementById('sparam-fmax');
   const stubZcIn  = document.getElementById('stub-zc');
@@ -40,9 +43,25 @@
   const qValIn    = document.getElementById('opt-qval');
   const chkReadout= document.getElementById('opt-readout');
   const zcTip     = document.getElementById('zc-tip');
+  const s11Canvas = document.getElementById('s11-canvas');
+  const s11Panel = document.getElementById('s11-panel');
+  let s11Ctx = s11Canvas ? s11Canvas.getContext('2d') : null;
+  let s11YMin = -40; // Default lower bound for S11 plot in dB
+  let s11YMax = 0;   // Default upper bound
   const contextMenu = document.getElementById('smith-context-menu');
   const cmParams    = document.getElementById('cm-params');
   const btnCancel   = document.getElementById('btn-cancel');
+  const btnMarkTarget = document.getElementById('btn-mark-target');
+  const btnClearTargets = document.getElementById('btn-clear-targets');
+  const cmTargetEdit = document.getElementById('cm-target-edit');
+  const cmQEdit = document.getElementById('cm-q-edit');
+  const cmComponents = document.getElementById('cm-components');
+  const btnTargetClose = document.getElementById('btn-target-close');
+  const btnQClose = document.getElementById('btn-q-close');
+  const tgtGammaIn = document.getElementById('tgt-gamma');
+  const tgtVswrIn  = document.getElementById('tgt-vswr');
+  const tgtRlIn    = document.getElementById('tgt-rl');
+  const btnDeleteTarget = document.getElementById('btn-delete-target');
   const compBtns  = Array.prototype.slice.call(document.querySelectorAll('.comp-btn'));
 
   const readout = {
@@ -68,8 +87,9 @@
     imped: '#c0392b', impedMinor: '#e8b4ad',
     admit: '#2166ac', admitMinor: '#aecbe5',
     crosshair: 'rgba(40,40,40,0.35)', vswr: 'rgba(180,80,20,0.5)',
-    point: '#111', q: '#7c3aed',
+    point: '#111', q: 'rgba(124,58,237,0.35)', qHot: '#7c3aed', qLabel: '#7c3aed',
     load: '#d97706', constraint: 'rgba(42,124,111,0.35)', preview: '#2A7C6F',
+    target: 'rgba(22,163,74,0.35)', targetHot: '#16a34a', targetLabel: '#22c55e',   // label a shade lighter than the circle
   };
   // Per-component colours: each component's trace arc, its ending node, and its
   // schematic symbol share one colour, cycling through this palette.
@@ -114,10 +134,18 @@
 
   // ---------- State ----------
   let load = { re: 0.5, im: -0.6 };   // normalized load impedance
-  let sParamData = null;              // [{f, s11: {re, im}}]
+  let sParamData = null;              // [{f, diag: [{re,im} per port]}] — diagonal Skk
   let sParamZ0 = 50;                  // reference impedance of the touchstone file
+  let sParamNumPorts = 1;             // number of ports in the loaded file
+  let activePort = 0;                 // 0-based port currently being matched
   let sParamTracePts = [];            // [{f, z, px, py}] cached trace points
-  let comps = [];                     // [{ id, dv, theta, zc }]
+  // One independent matching network per port. `comps` always aliases the
+  // active port's array; push/pop mutate it in place so the alias stays valid.
+  let compsByPort = [[]];             // compsByPort[port] = [{ id, dv, theta, zc }]
+  let comps = compsByPort[0];
+  // Per-port constant-|Γ| matching-target circles: markedByPort[port] = [{ re, im, rho }]
+  let markedByPort = [[]];
+  let ctxMenuTarget = null;           // Γ under the cursor when the menu was opened
   let armedId = null;                 // component id currently armed for placement
   let preview = null;                 // { id, dv, theta, zNew, sol, zc_val, zc, zcn }
   let dragging = null;                // null or { load:true } or { index:i }
@@ -129,6 +157,12 @@
   let zoomScale = 1;
   let panX = 0, panY = 0;       // last mouse pos in client (page) coords
   let qHotTimer = null;              // dwell timer handle
+  let tgtHoverIndex = -1;            // marked-target circle under the cursor
+  let tgtHotIndex = -1;              // marked-target circle grabbed after dwell
+  let tgtHotTimer = null;            // dwell timer handle
+  let ctxTargetIndex = -1;           // marked circle the context menu was opened on
+  let ctxQIndex = -1;                // Q circle the context menu was opened on
+  let pointerOverCanvas = false;     // cursor genuinely on the chart (not the menu)
 
   // ---------- Geometry ----------
   let cx = 0, cy = 0, R = 0, dpr = 1;
@@ -320,31 +354,11 @@
   }
 
   // ---------- Grid ----------
-  // Run `draw(scale)` with the canvas's ambient dpr scale-transform swapped
-  // out for the identity matrix, so it can stroke a path built directly in
-  // device pixels (multiplying its own coordinates/lineWidth/dash by `scale`)
-  // instead of relying on the CTM to do that scaling. WebKit/Safari renders
-  // circular-arc strokes under a scaled CTM with visibly inconsistent
-  // per-segment anti-aliasing — parts of the same circle render solid,
-  // parts render faint — which Chromium-based browsers don't exhibit;
-  // stroking directly in device pixels avoids it. Scoped to the persistent
-  // background grid only (gridCanvas), not the interactive hover canvas.
-  function crispStroke(ctx, draw) {
-    ctx.save();
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    draw(dpr);
-    ctx.stroke();
-    ctx.restore();
-  }
   function gCircle(ctx, gcx, gcy, gr) {
     const [ccx, ccy] = gToC(gcx, gcy);
-    const lw = ctx.lineWidth, dash = ctx.getLineDash ? ctx.getLineDash() : [];
-    crispStroke(ctx, function (s) {
-      ctx.lineWidth = lw * s;
-      if (dash.length) ctx.setLineDash(dash.map(function (d) { return d * s; }));
-      ctx.beginPath();
-      ctx.arc(ccx * s, ccy * s, gr * R * s, 0, 2 * Math.PI);
-    });
+    ctx.beginPath();
+    ctx.arc(ccx, ccy, gr * R, 0, 2 * Math.PI);
+    ctx.stroke();
   }
   function clipUnit(ctx) {
     ctx.beginPath(); ctx.arc(cx, cy, R, 0, 2 * Math.PI); ctx.clip();
@@ -369,20 +383,15 @@
     
     if (chkQ.checked) drawQCircles();
 
-    gctx.strokeStyle = COL.axis;
-    crispStroke(gctx, function (s) {
-      gctx.lineWidth = crispWidth(1.1) * s;
-      gctx.beginPath();
-      gctx.moveTo((cx - R) * s, cy * s);
-      gctx.lineTo((cx + R) * s, cy * s);
-    });
+    gctx.save();
+    gctx.strokeStyle = COL.axis; gctx.lineWidth = crispWidth(1.1);
+    gctx.beginPath(); gctx.moveTo(cx - R, cy); gctx.lineTo(cx + R, cy); gctx.stroke();
+    gctx.restore();
 
-    gctx.strokeStyle = COL.outer;
-    crispStroke(gctx, function (s) {
-      gctx.lineWidth = crispWidth(1.6) * s;
-      gctx.beginPath();
-      gctx.arc(cx * s, cy * s, R * s, 0, 2 * Math.PI);
-    });
+    gctx.save();
+    gctx.strokeStyle = COL.outer; gctx.lineWidth = crispWidth(1.6);
+    gctx.beginPath(); gctx.arc(cx, cy, R, 0, 2 * Math.PI); gctx.stroke();
+    gctx.restore();
 
     if (chkImped.checked) drawLabels(vals, true);
     if (chkAdmit.checked) drawLabels(vals, false);
@@ -416,6 +425,15 @@
       .map(function (s) { return parseFloat(s.trim()); })
       .filter(function (q) { return isFinite(q) && q > 0; });
   }
+
+  function setQValue(index, newQ) {
+    const qs = parseQ();
+    if (index >= 0 && index < qs.length) {
+      qs[index] = newQ;
+      qValIn.value = qs.join(', ');
+      drawGrid();
+    }
+  }
   // constant-Q locus: circle centred at (0, ∓1/Q) with radius √(1+1/Q²), through Γ=±1
   function drawQCircles() {
     const qs = parseQ();
@@ -429,7 +447,7 @@
     gctx.restore();
     // label each Q at the apex of its upper arc
     gctx.save();
-    gctx.fillStyle = COL.q;
+    gctx.fillStyle = COL.qLabel;
     gctx.font = '600 11px "JetBrains Mono", "Fira Code", monospace';
     gctx.textAlign = 'center'; gctx.textBaseline = 'bottom';
     qs.forEach(function (Q) {
@@ -602,7 +620,10 @@
 
   function drawSParamTrace() {
     sParamTracePts = [];
-    if (!sParamData || sParamData.length === 0) return;
+    if (!sParamData || sParamData.length === 0) {
+      if (typeof drawS11Plot === 'function') drawS11Plot();
+      return;
+    }
     const z0 = getZ0();
     const f_d = getFreq();
     const fmin = parseFloat(sparamFminIn.value) * 1e9 || 0;
@@ -612,14 +633,15 @@
     const isTransformed = comps.length > 0 || (armedId && preview);
     sParamData.forEach(function(dp) {
       if (dp.f < fmin || dp.f > fmax) return;
-      const s11 = dp.s11;
+      const s11 = portRefl(dp);
       const num = { re: 1 + s11.re, im: s11.im };
       const den = { re: 1 - s11.re, im: -s11.im };
       let zUnnorm = cDiv(num, den);
       zUnnorm = { re: zUnnorm.re * sParamZ0, im: zUnnorm.im * sParamZ0 };
       let zNorm = { re: zUnnorm.re / z0, im: zUnnorm.im / z0 };
-      
-      if (isTransformed) rawGpts.push(zToG(zNorm));
+      const rawG = zToG(zNorm);
+      const [rawPx, rawPy] = gToC(rawG.re, rawG.im);
+      if (isTransformed) rawGpts.push(rawG);
 
       for (let i = 0; i < comps.length; i++) {
         zNorm = applyEntryAtFreq(zNorm, comps[i], dp.f, f_d);
@@ -630,12 +652,131 @@
       const g = zToG(zNorm);
       gpts.push(g);
       const [px, py] = gToC(g.re, g.im);
-      sParamTracePts.push({ f: dp.f, z: zNorm, px: px, py: py });
+      sParamTracePts.push({ f: dp.f, z: zNorm, px: px, py: py, rawPx: rawPx, rawPy: rawPy });
     });
     if (isTransformed) {
       polyline(rawGpts, 'rgba(100,100,100,0.3)', 1.5, [4, 4]);
     }
     polyline(gpts, 'rgba(100,100,100,0.6)', 2);
+    
+    if (typeof drawS11Plot === 'function') drawS11Plot();
+  }
+
+  function drawS11Plot() {
+    if (!s11Ctx || !s11Canvas) return;
+    const rect = s11Canvas.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+    
+    const dpr = window.devicePixelRatio || 1;
+    s11Canvas.width = rect.width * dpr;
+    s11Canvas.height = rect.height * dpr;
+    s11Ctx.scale(dpr, dpr);
+    
+    const w = rect.width;
+    const h = rect.height;
+    const pad = { top: 20, right: 20, bottom: 30, left: 50 };
+    const wPlot = w - pad.left - pad.right;
+    const hPlot = h - pad.top - pad.bottom;
+    
+    s11Ctx.clearRect(0, 0, w, h);
+    
+    if (!sParamTracePts || sParamTracePts.length === 0) {
+      s11Ctx.fillStyle = COL.textSecondary || '#666';
+      s11Ctx.font = '14px "Inter", sans-serif';
+      s11Ctx.textAlign = 'center';
+      s11Ctx.textBaseline = 'middle';
+      s11Ctx.fillText('No S-parameter trace data', w / 2, h / 2);
+      return;
+    }
+    
+    const fmin = parseFloat(sparamFminIn.value) * 1e9 || 0;
+    const fmax = parseFloat(sparamFmaxIn.value) * 1e9 || 0;
+    if (fmin >= fmax) return;
+    
+    const yMin = s11YMin;
+    const yMax = s11YMax;
+    
+    const mapX = f => pad.left + wPlot * ((f - fmin) / (fmax - fmin));
+    const mapY = y => pad.top + hPlot * (1 - (y - yMin) / (yMax - yMin));
+    
+    // Draw Grid
+    s11Ctx.strokeStyle = 'rgba(100,100,100,0.2)';
+    s11Ctx.lineWidth = 1;
+    s11Ctx.beginPath();
+    
+    s11Ctx.fillStyle = COL.textSecondary || '#666';
+    s11Ctx.font = '10px "JetBrains Mono", monospace';
+    
+    // Y-axis grid
+    s11Ctx.textAlign = 'right';
+    s11Ctx.textBaseline = 'middle';
+    const yStep = Math.max(1, Math.floor((yMax - yMin) / 5 / 10) * 10 || 10);
+    const startY = Math.ceil(yMin / yStep) * yStep;
+    for (let y = startY; y <= yMax; y += yStep) {
+      const py = mapY(y);
+      if (py >= pad.top && py <= h - pad.bottom) {
+        s11Ctx.moveTo(pad.left, py);
+        s11Ctx.lineTo(w - pad.right, py);
+        s11Ctx.fillText(y + ' dB', pad.left - 5, py);
+      }
+    }
+    
+    // X-axis grid
+    s11Ctx.textAlign = 'center';
+    s11Ctx.textBaseline = 'top';
+    const fRange = fmax - fmin;
+    for (let i = 0; i <= 5; i++) {
+      const f = fmin + fRange * (i / 5);
+      const px = mapX(f);
+      s11Ctx.moveTo(px, pad.top);
+      s11Ctx.lineTo(px, h - pad.bottom);
+      
+      const f_GHz = f / 1e9;
+      let fLabel = '';
+      if (f_GHz >= 1) fLabel = f_GHz.toFixed(2) + ' G';
+      else fLabel = (f_GHz * 1000).toFixed(0) + ' M';
+      
+      s11Ctx.fillText(fLabel, px, h - pad.bottom + 5);
+    }
+    s11Ctx.stroke();
+    
+    // Axes outlines
+    s11Ctx.strokeStyle = COL.axis || '#333';
+    s11Ctx.lineWidth = 1.5;
+    s11Ctx.strokeRect(pad.left, pad.top, wPlot, hPlot);
+    
+    // Draw Trace
+    s11Ctx.save();
+    s11Ctx.beginPath();
+    s11Ctx.rect(pad.left, pad.top, wPlot, hPlot);
+    s11Ctx.clip();
+    
+    s11Ctx.beginPath();
+    s11Ctx.strokeStyle = '#c0392b';
+    s11Ctx.lineWidth = 2;
+    s11Ctx.lineJoin = 'round';
+    
+    let first = true;
+    for (let i = 0; i < sParamTracePts.length; i++) {
+      const pt = sParamTracePts[i];
+      if (pt.f < fmin || pt.f > fmax) continue;
+      
+      const g = zToG(pt.z);
+      const rho = Math.hypot(g.re, g.im);
+      const db = rhoToDb(rho);
+      
+      const px = mapX(pt.f);
+      const py = mapY(db);
+      
+      if (first) {
+        s11Ctx.moveTo(px, py);
+        first = false;
+      } else {
+        s11Ctx.lineTo(px, py);
+      }
+    }
+    s11Ctx.stroke();
+    s11Ctx.restore();
   }
 
   // component index whose trace polyline passes within `tol` px of the mouse, else -1
@@ -659,8 +800,79 @@
     return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
   }
 
+  // Persistent constant-|Γ| target circles for the active port. A user marks
+  // one from the right-click menu; the matching goal is to land the input
+  // reflection (end of the chain) inside the smallest marked circle.
+  function drawMarkedCircles() {
+    const marks = markedByPort[activePort];
+    if (!marks || !marks.length) return;
+    hctx.save(); clipUnit(hctx);
+    hctx.strokeStyle = COL.target; hctx.lineWidth = 1.5; hctx.setLineDash([5, 3]);
+    marks.forEach(function (m) {
+      hctx.beginPath(); hctx.arc(cx, cy, m.rho * R, 0, 2 * Math.PI); hctx.stroke();
+    });
+    hctx.restore();
+    marks.forEach(drawTargetRlLabel);
+  }
+
+  // Return-loss label set along the circle's own circumference, each glyph
+  // rotated to the local tangent. Drawn from the live rho, so it tracks a drag.
+  const TGT_LABEL_BEARING = -2.36;                 // ~upper-left, clear of the
+                                                   // dense right-hand grid
+  function drawTargetRlLabel(m) {
+    const rad = m.rho * R;
+    if (rad < 22) return;                          // too tight to seat text on
+    const text = rhoToDb(m.rho).toFixed(1) + ' dB';
+    hctx.save();
+    hctx.font = '600 11px "JetBrains Mono", "Fira Code", monospace';
+    hctx.fillStyle = COL.targetLabel;
+    hctx.textAlign = 'center';
+    hctx.textBaseline = 'middle';
+    const chars = text.split('');
+    const widths = chars.map(function (c) { return hctx.measureText(c).width; });
+    let total = 0;
+    widths.forEach(function (w) { total += w; });
+    // sit the string centred on the bearing; letters advance along the arc, and
+    // an outward offset keeps the glyphs off the stroke itself
+    const rText = rad + 8;
+    let a = TGT_LABEL_BEARING - (total / 2) / rText;
+    chars.forEach(function (c, i) {
+      a += (widths[i] / 2) / rText;
+      hctx.save();
+      hctx.translate(cx + rText * Math.cos(a), cy + rText * Math.sin(a));
+      hctx.rotate(a + Math.PI / 2);                // align baseline to tangent
+      hctx.fillText(c, 0, 0);
+      hctx.restore();
+      a += (widths[i] / 2) / rText;
+    });
+    hctx.restore();
+  }
+
+  // bright overlay of the target circle currently "grabbed" (after dwell), so
+  // it's obvious which one a drag will resize.
+  function drawTargetHighlight() {
+    const marks = markedByPort[activePort];
+    const m = marks && marks[tgtHotIndex];
+    if (!m) return;
+    hctx.save(); clipUnit(hctx);
+    hctx.strokeStyle = COL.targetHot; hctx.lineWidth = 3; hctx.setLineDash([]);
+    hctx.beginPath(); hctx.arc(cx, cy, m.rho * R, 0, 2 * Math.PI); hctx.stroke();
+    hctx.restore();
+  }
+
   function renderOverlay(mouse) {
     clearHover();
+    drawMarkedCircles();                            // persistent matching targets (under everything)
+    drawTargetHighlight();
+
+    // Resizing a target or Q circle: keep the normal chart drawn underneath so the
+    // user can see the chain/trace they're sizing the circle against.
+    if (dragging && (dragging.target != null || dragging.qIndex != null)) {
+      if (sParamData) drawSParamTrace();
+      drawChain();
+      if (mouse) drawInspect(mouse);
+      return;
+    }
 
     if (dragging && mouse) { drawEditing(mouse); return; }
 
@@ -685,7 +897,7 @@
     if (Q == null) return;
     const rad = Math.sqrt(1 + 1 / (Q * Q));
     hctx.save(); clipUnit(hctx);
-    hctx.strokeStyle = COL.q; hctx.lineWidth = 3; hctx.setLineDash([]);
+    hctx.strokeStyle = COL.qHot; hctx.lineWidth = 3; hctx.setLineDash([]);
     [-1 / Q, 1 / Q].forEach(function (cyv) {
       const c = gToC(0, cyv);
       hctx.beginPath(); hctx.arc(c[0], c[1], rad * R, 0, 2 * Math.PI); hctx.stroke();
@@ -743,6 +955,7 @@
     if (dragging.load) { drawEditingLoad(mouse); return; }
     const index = dragging.index;
     const entry = comps[index];
+    if (!entry) return;                            // pan/target drags land here too
     const comp = COMPONENTS[entry.id];
     const zIn = prefixNode(index);
     const sol = solveParam(comp, zIn, mouse, entry.zc);
@@ -770,13 +983,56 @@
     renderCircuitInfo();
   }
 
+  // Frequency at the point on the trace polyline nearest the cursor. Projecting
+  // onto each segment (rather than snapping to the sampled points) keeps the
+  // drag continuous, so a coarsely-sampled file doesn't quantise the frequency.
+  function freqAtTrace(mouse, useRaw) {
+    const pts = sParamTracePts;
+    if (!pts || pts.length === 0) return null;
+    if (pts.length === 1) return pts[0].f;
+    let bestD = Infinity, bestF = pts[0].f;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i], b = pts[i + 1];
+      const ax = useRaw ? a.rawPx : a.px;
+      const ay = useRaw ? a.rawPy : a.py;
+      const bx = useRaw ? b.rawPx : b.px;
+      const by = useRaw ? b.rawPy : b.py;
+      const dx = bx - ax, dy = by - ay;
+      const L2 = dx * dx + dy * dy;
+      let t = L2 ? ((mouse.x - ax) * dx + (mouse.y - ay) * dy) / L2 : 0;
+      t = Math.max(0, Math.min(1, t));
+      const d = Math.hypot(mouse.x - (ax + t * dx), mouse.y - (ay + t * dy));
+      if (d < bestD) { bestD = d; bestF = a.f + t * (b.f - a.f); }
+    }
+    return bestF;
+  }
+  function setDesignFreq(f) {
+    const mult = parseFloat(freqUnit.value) || 1;
+    // 6 dp in the displayed unit — fine enough that dragging reads as smooth
+    freqIn.value = String(Math.round((f / mult) * 1e6) / 1e6);
+    syncLoad();
+  }
+  // With a touchstone file loaded the load isn't free — it's whatever the file
+  // says at the design frequency. So dragging its marker walks the design
+  // frequency along the imported trace instead of setting an arbitrary Z_L.
+  function dragLoadAlongTrace(mouse) {
+    const f = freqAtTrace(mouse, true);                 // from the cached trace points
+    if (f == null) return;
+    setDesignFreq(f);
+    drawSParamTrace();                            // redraw curve + refresh cache
+    drawChain();
+    dot(zToG(load), COL.preview, 6);
+    updateReadout(load, true, f);
+    armHint.classList.add('show');
+    armHint.innerHTML = '<b>Design frequency</b> · drag along trace · <b>'
+      + engFmt(f, [[1e9, 1e9, 'GHz'], [1e6, 1e6, 'MHz'], [1e3, 1e3, 'kHz'], [0, 1, 'Hz']]) + '</b>';
+    renderSchematic();
+    renderCircuitInfo();
+  }
+
   // dragging the load node: set Z_L directly from the cursor (clamped inside |Γ|=1)
   function drawEditingLoad(mouse) {
-    if (sParamData) {
-      armHint.classList.add('show');
-      armHint.innerHTML = '<b>Cannot drag load</b> · Clear S-parameter file first.';
-      return;
-    }
+    if (sParamData) { dragLoadAlongTrace(mouse); return; }
     let g = cToG(mouse.x, mouse.y);
     let gre = g[0], gim = g[1];
     const rho = Math.hypot(gre, gim);
@@ -1115,7 +1371,8 @@
     lg.appendChild(el('line', { x1: lx, y1: railY, x2: lx, y2: railY + 12, class: 'sch-wire' }));
     lg.appendChild(el('rect', { x: lx - 14, y: railY + 12, width: 28, height: 32, rx: 3, class: 'sch-load' }));
     lg.appendChild(el('line', { x1: lx, y1: railY + 44, x2: lx, y2: gndY, class: 'sch-wire' }));
-    lg.appendChild(el('text', { x: lx, y: railY + 32, 'text-anchor': 'middle', class: 'sch-load-lbl' }, [txt('Z_L')]));
+    const loadName = (sParamData && sParamNumPorts > 1) ? 'P' + (activePort + 1) : 'Z_L';
+    lg.appendChild(el('text', { x: lx, y: railY + 32, 'text-anchor': 'middle', class: 'sch-load-lbl' }, [txt(loadName)]));
     lg.appendChild(el('text', { x: lx, y: labelY0, 'text-anchor': 'middle', class: 'sch-load-lbl' }, [txt(loadLbl)]));
     svg.appendChild(lg);
 
@@ -1207,17 +1464,42 @@
   }
 
   // ---------- S-Parameter Import & Load ----------
-  function parseTouchstone(text) {
+  // one (real, imag) Touchstone pair → complex, per the file's data format
+  function touchstoneComplex(a, b, format) {
+    if (format === 'RI') return { re: a, im: b };
+    const ang = b * Math.PI / 180;
+    const mag = format === 'DB' ? Math.pow(10, a / 20) : a;   // DB else MA
+    return { re: mag * Math.cos(ang), im: mag * Math.sin(ang) };
+  }
+  // Infer the port count from a flat list of data numbers: an N-port record is
+  // 1 + 2·N² numbers, and frequencies are non-decreasing. Pick the smallest N
+  // that divides the stream evenly and yields a monotonic frequency column.
+  function inferPorts(nums) {
+    for (let N = 1; N <= 16; N++) {
+      const recLen = 1 + 2 * N * N;
+      if (nums.length < recLen || nums.length % recLen !== 0) continue;
+      let ok = true, prev = -Infinity;
+      for (let i = 0; i < nums.length; i += recLen) {
+        if (nums[i] < prev) { ok = false; break; }
+        prev = nums[i];
+      }
+      if (ok) return N;
+    }
+    return 0;
+  }
+  // Parse a 1..N-port Touchstone file. `nPortsHint` (from the .sNp extension)
+  // is used when present; otherwise the port count is inferred. Only the
+  // diagonal Skk of each frequency point is retained (all off-diagonal terms
+  // describe coupling to other ports, which we treat as matched to Z0).
+  function parseTouchstone(text, nPortsHint) {
     const lines = text.split('\n');
-    let freqMult = 1e9;
-    let format = 'MA';
-    let z0 = 50;
-    const data = [];
+    let freqMult = 1e9, format = 'MA', z0 = 50, nPorts = nPortsHint || 0;
+    const nums = [];
     for (let i = 0; i < lines.length; i++) {
-      let line = lines[i].trim();
-      if (!line || line.startsWith('!')) continue;
-      if (line.startsWith('#')) {
-        const parts = line.substring(1).trim().split(/\s+/).map(function(s){ return s.toUpperCase(); });
+      let line = lines[i].split('!')[0].trim();          // strip inline comments
+      if (!line) continue;
+      if (line.charAt(0) === '#') {
+        const parts = line.substring(1).trim().split(/\s+/).map(function (s) { return s.toUpperCase(); });
         if (parts.indexOf('HZ') >= 0) freqMult = 1;
         else if (parts.indexOf('KHZ') >= 0) freqMult = 1e3;
         else if (parts.indexOf('MHZ') >= 0) freqMult = 1e6;
@@ -1229,37 +1511,48 @@
         if (rIdx >= 0 && rIdx + 1 < parts.length) z0 = parseFloat(parts[rIdx + 1]);
         continue;
       }
-      const parts = line.split(/\s+/).filter(function(s){ return s; });
-      if (parts.length >= 3) {
-        const f = parseFloat(parts[0]) * freqMult;
-        const p1 = parseFloat(parts[1]);
-        const p2 = parseFloat(parts[2]);
-        let s11 = { re: 0, im: 0 };
-        if (format === 'MA') {
-          const ang = p2 * Math.PI / 180;
-          s11 = { re: p1 * Math.cos(ang), im: p1 * Math.sin(ang) };
-        } else if (format === 'DB') {
-          const mag = Math.pow(10, p1 / 20);
-          const ang = p2 * Math.PI / 180;
-          s11 = { re: mag * Math.cos(ang), im: mag * Math.sin(ang) };
-        } else if (format === 'RI') {
-          s11 = { re: p1, im: p2 };
-        }
-        data.push({ f: f, s11: s11 });
+      if (line.charAt(0) === '[') {                        // Touchstone 2.0 keyword
+        const m = line.match(/\[Number of Ports\]\s*(\d+)/i);
+        if (m) nPorts = parseInt(m[1], 10);
+        continue;
       }
+      line.split(/[\s,]+/).forEach(function (t) {
+        if (t.length) { const v = parseFloat(t); if (!isNaN(v)) nums.push(v); }
+      });
     }
-    data.sort(function(a, b) { return a.f - b.f; });
-    return { z0: z0, data: data };
+    if (!nPorts) nPorts = inferPorts(nums);
+    if (!nPorts) return { nPorts: 0, z0: z0, data: [] };
+
+    const recLen = 1 + 2 * nPorts * nPorts;
+    const data = [];
+    for (let i = 0; i + recLen <= nums.length; i += recLen) {
+      const f = nums[i] * freqMult;
+      const diag = [];
+      for (let k = 0; k < nPorts; k++) {
+        // Diagonal Skk sits at flat matrix index k·N+k for every N (this also
+        // matches the special 2-port S11 S21 S12 S22 column ordering).
+        const pair = i + 1 + (k * nPorts + k) * 2;
+        diag.push(touchstoneComplex(nums[pair], nums[pair + 1], format));
+      }
+      data.push({ f: f, diag: diag });
+    }
+    data.sort(function (a, b) { return a.f - b.f; });
+    return { nPorts: nPorts, z0: z0, data: data };
   }
 
+  // reflection coefficient of the active port at a stored data point
+  function portRefl(dp) { return dp.diag[activePort] || dp.diag[0]; }
+
+  // interpolate the active port's reflection coefficient at an arbitrary freq
   function interpolateSParam(freq) {
     if (!sParamData || sParamData.length === 0) return null;
-    if (freq <= sParamData[0].f) return sParamData[0].s11;
-    if (freq >= sParamData[sParamData.length - 1].f) return sParamData[sParamData.length - 1].s11;
-    for (let i = 0; i < sParamData.length - 1; i++) {
+    if (freq <= sParamData[0].f) return portRefl(sParamData[0]);
+    const last = sParamData.length - 1;
+    if (freq >= sParamData[last].f) return portRefl(sParamData[last]);
+    for (let i = 0; i < last; i++) {
       if (freq >= sParamData[i].f && freq <= sParamData[i + 1].f) {
         const f0 = sParamData[i].f, f1 = sParamData[i + 1].f;
-        const s0 = sParamData[i].s11, s1 = sParamData[i + 1].s11;
+        const s0 = portRefl(sParamData[i]), s1 = portRefl(sParamData[i + 1]);
         const t = (freq - f0) / (f1 - f0);
         return { re: s0.re + t * (s1.re - s0.re), im: s0.im + t * (s1.im - s0.im) };
       }
@@ -1403,12 +1696,29 @@
   }
   function hideTip() { zcTip.style.display = 'none'; }
   function zcTipHtml(zc) { return 'Z<sub>c</sub> = ' + fmtZc(zc) + ' Ω <small>· scroll to change</small>'; }
+  function qTipHtml(i, showHint) {
+    const qs = parseQ();
+    if (qs[i] == null) return null;
+    return 'Q = ' + qs[i] + ' <small>· ' + (showHint ? 'drag to resize · ' : '') + 'scroll to change</small>';
+  }
+  function targetTipHtml(i, showHint) {
+    const m = markedByPort[activePort][i];
+    if (!m) return null;
+    const v = rhoToVswr(m.rho);
+    return '|Γ| = ' + m.rho.toFixed(3)
+      + ' <small>· VSWR ' + (isFinite(v) ? v.toFixed(2) : '∞')
+      + ' · RL ' + rhoToDb(m.rho).toFixed(1) + ' dB'
+      + (showHint ? ' · drag to resize' : '') + '</small>';
+  }
   function refreshTip(clientX, clientY) {
     if (clientX == null) { hideTip(); return; }
     let html = null;
     if (dragging && dragging.index != null && compUsesZc(comps[dragging.index].id)) html = zcTipHtml(comps[dragging.index].zc);
+    else if (dragging && dragging.target != null) html = targetTipHtml(dragging.target, false);
+    else if (dragging && dragging.qIndex != null) html = qTipHtml(dragging.qIndex, false);
+    else if (tgtHotIndex >= 0) html = targetTipHtml(tgtHotIndex, true);
     else if (armedId && compUsesZc(armedId)) html = zcTipHtml(currentStubParams().zc);
-    else if (qHotIndex >= 0) { const qs = parseQ(); if (qs[qHotIndex] != null) html = 'Q = ' + qs[qHotIndex] + ' <small>· scroll to change</small>'; }
+    else if (qHotIndex >= 0) html = qTipHtml(qHotIndex, true);
     if (html) showTip(clientX, clientY, html); else hideTip();
   }
 
@@ -1428,6 +1738,9 @@
     });
     return best;
   }
+  // Hover dwell before a circle becomes grabbable — shared by the constant-Q
+  // circles and the matching-target circles so both feel the same.
+  const DWELL_MS = 500;
   function clearQHot() {
     if (qHotTimer) { clearTimeout(qHotTimer); qHotTimer = null; }
     qHoverIndex = -1; qHotIndex = -1;
@@ -1440,18 +1753,90 @@
     if (idx !== qHotIndex) qHotIndex = -1;        // moved off the grabbed circle
     if (idx >= 0) {
       qHotTimer = setTimeout(function () {
-        qHotIndex = qHoverIndex;                  // grab after 3 s dwell
+        qHotIndex = qHoverIndex;                  // grab after the dwell
         renderOverlay(lastMouse);
         if (lastClient) refreshTip(lastClient.x, lastClient.y);
-      }, 3000);
+      }, DWELL_MS);
     }
+  }
+
+  // ---------- Matching-target circles: hover dwell, drag, value edit ----------
+  // A target is a constant-|Γ| circle centred on the origin, so hit-testing is
+  // just "is the cursor's radius close to the circle's radius".
+  function targetAt(mouse, tolPx) {
+    const marks = markedByPort[activePort];
+    if (!marks || !marks.length) return -1;
+    const g = cToG(mouse.x, mouse.y);
+    const rho = Math.hypot(g[0], g[1]);
+    let best = -1, bestD = (tolPx || 8) / R;        // tolerance in Γ units
+    marks.forEach(function (m, i) {
+      const d = Math.abs(rho - m.rho);
+      if (d < bestD) { bestD = d; best = i; }
+    });
+    return best;
+  }
+  function clearTargetHot() {
+    if (tgtHotTimer) { clearTimeout(tgtHotTimer); tgtHotTimer = null; }
+    tgtHoverIndex = -1; tgtHotIndex = -1;
+  }
+  function handleTargetDwell(mouse) {
+    const idx = targetAt(mouse, 8);
+    if (idx === tgtHoverIndex) return;              // still on the same circle → keep counting
+    tgtHoverIndex = idx;
+    if (tgtHotTimer) { clearTimeout(tgtHotTimer); tgtHotTimer = null; }
+    if (idx !== tgtHotIndex) tgtHotIndex = -1;      // moved off the grabbed circle
+    if (idx >= 0) {
+      tgtHotTimer = setTimeout(function () {
+        tgtHotIndex = tgtHoverIndex;                // grab after the dwell
+        renderOverlay(lastMouse);
+        if (lastClient) refreshTip(lastClient.x, lastClient.y);
+      }, DWELL_MS);
+    }
+  }
+  // |Γ| ↔ VSWR ↔ return loss are the same target expressed three ways.
+  function rhoToVswr(r) { return r >= 1 ? Infinity : (1 + r) / (1 - r); }
+  function vswrToRho(v) { return v <= 1 ? 0 : (v - 1) / (v + 1); }
+  function rhoToDb(r)   { return r <= 0 ? -Infinity : 20 * Math.log10(r); }
+  function dbToRho(d)   { return Math.pow(10, d / 20); }
+  // Resize a target, preserving the angle of its marker dot.
+  function setTargetRho(i, rho) {
+    const m = markedByPort[activePort][i];
+    if (!m) return;
+    m.rho = Math.max(0.001, Math.min(1, rho));
+    const ang = Math.atan2(m.im, m.re);
+    m.re = m.rho * Math.cos(ang);
+    m.im = m.rho * Math.sin(ang);
+  }
+
+  // Coalesce repaints to one per animation frame. A full overlay redraw costs
+  // tens of ms once a large touchstone trace is loaded, while a mouse emits a
+  // move every ~8ms — redrawing per event saturates the main thread, so the
+  // canvas visibly stops updating until the drag ends and the queue drains.
+  let pendingFrame = 0;
+  function scheduleRender() {
+    if (pendingFrame) return;
+    pendingFrame = requestAnimationFrame(function () {
+      pendingFrame = 0;
+      renderOverlay(lastMouse);
+    });
+  }
+  function cancelScheduledRender() {
+    if (pendingFrame) { cancelAnimationFrame(pendingFrame); pendingFrame = 0; }
   }
 
   function setTraceHot(idx) { if (idx !== traceHotIndex) { traceHotIndex = idx; setSchematicHot(idx); } }
 
   // ---------- Events ----------
   function closeContextMenu() {
+    const wasOpen = contextMenu.style.display === 'block';
     contextMenu.style.display = 'none';
+    // The inspect visuals are frozen while the menu is open (see mouseleave).
+    // Once it closes, drop them unless the cursor is genuinely back on the chart.
+    if (wasOpen && !pointerOverCanvas) {
+      lastMouse = null;
+      clearQHot(); clearTargetHot(); setTraceHot(-1);
+      renderOverlay(null); hideTip();
+    }
   }
 
   document.addEventListener('click', function(e) {
@@ -1463,11 +1848,43 @@
   hoverCanvas.addEventListener('contextmenu', function (e) {
     e.preventDefault();
     closeContextMenu();
-    
+
     btnUndo.disabled = comps.length === 0;
     btnReset.disabled = comps.length === 0;
 
-    if (armedId && compUsesZc(armedId)) {
+    // Reflection coefficient under the cursor → target circle radius. Only
+    // valid (markable) if the click is inside the unit circle |Γ| ≤ 1.
+    const rect = hoverCanvas.getBoundingClientRect();
+    // Draw the inspect visuals at the click point before the menu covers the
+    // cursor, so the |Γ| circle on screen is exactly what's about to be marked.
+    pointerOverCanvas = true;
+    lastMouse = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    lastClient = { x: e.clientX, y: e.clientY };
+
+    // Right-clicking a target circle swaps the whole menu for that circle's
+    // editor. Highlight it too, so it's obvious which one is being edited.
+    ctxTargetIndex = targetAt(lastMouse, 8);
+    const onTarget = ctxTargetIndex >= 0;
+    if (onTarget) tgtHotIndex = tgtHoverIndex = ctxTargetIndex;
+
+    ctxQIndex = qUnderCursor(lastMouse);
+    const onQ = ctxQIndex >= 0;
+    if (onQ) qHotIndex = qHoverIndex = ctxQIndex;
+
+    if (!dragging) renderOverlay(lastMouse);      // never re-enter a drag render
+
+    const g = cToG(e.clientX - rect.left, e.clientY - rect.top);
+    const rho = Math.hypot(g[0], g[1]);
+    ctxMenuTarget = rho <= 1.0001 ? { re: g[0], im: g[1], rho: rho } : null;
+    btnMarkTarget.disabled = !ctxMenuTarget;
+    btnClearTargets.disabled = markedCircles().length === 0;
+
+    cmComponents.style.display = (onTarget || onQ) ? 'none' : 'block';
+    cmTargetEdit.style.display = onTarget ? 'block' : 'none';
+    cmQEdit.style.display = onQ ? 'block' : 'none';
+    if (onTarget) syncTargetInputs(ctxTargetIndex);
+
+    if (!onTarget && !onQ && armedId && compUsesZc(armedId)) {
       cmParams.style.display = 'block';
     } else {
       cmParams.style.display = 'none';
@@ -1476,11 +1893,15 @@
     contextMenu.style.display = 'block';
     contextMenu.style.left = e.clientX + 'px';
     contextMenu.style.top = e.clientY + 'px';
-    
-    // adjust if it goes offscreen
-    const rect = contextMenu.getBoundingClientRect();
-    if (rect.right > window.innerWidth) contextMenu.style.left = (window.innerWidth - rect.width - 10) + 'px';
-    if (rect.bottom > window.innerHeight) contextMenu.style.top = (window.innerHeight - rect.height - 10) + 'px';
+
+    // Keep it fully within the viewport (it also scrolls internally via
+    // max-height + overflow-y in CSS, for when it's taller than the window).
+    const menuRect = contextMenu.getBoundingClientRect();
+    let left = e.clientX, top = e.clientY;
+    if (left + menuRect.width > window.innerWidth) left = window.innerWidth - menuRect.width - 10;
+    if (top + menuRect.height > window.innerHeight) top = window.innerHeight - menuRect.height - 10;
+    contextMenu.style.left = Math.max(10, left) + 'px';
+    contextMenu.style.top = Math.max(10, top) + 'px';
   });
 
   hoverCanvas.addEventListener('mousemove', function (e) {
@@ -1495,19 +1916,57 @@
       return;
     }
 
-    if (!dragging && !armedId) { handleQDwell(lastMouse); setTraceHot(traceAt(lastMouse, 6)); }
+    // resizing a target circle: its radius follows the cursor
+    if (dragging && dragging.target != null) {
+      const g = cToG(lastMouse.x, lastMouse.y);
+      setTargetRho(dragging.target, Math.hypot(g[0], g[1]));
+      // only worth writing the value fields back if they're actually on screen
+      if (contextMenu.style.display === 'block') syncTargetInputs(dragging.target);
+      scheduleRender();
+      hoverCanvas.style.cursor = 'grabbing';
+      refreshTip(e.clientX, e.clientY);
+      return;
+    }
+
+    // resizing a Q circle: its Q value follows the cursor
+    if (dragging && dragging.qIndex != null) {
+      const g = cToG(lastMouse.x, lastMouse.y);
+      const rho = Math.hypot(g[0], g[1]);
+      if (rho < 0.999) {
+        const z = gToZ({ re: g[0], im: g[1] });
+        if (z.re > 0 && Math.abs(z.im) > 0.01) {
+          let newQ = Math.abs(z.im) / z.re;
+          newQ = Math.max(0.1, Math.round(newQ * 10) / 10);
+          setQValue(dragging.qIndex, newQ);
+          scheduleRender();
+          hoverCanvas.style.cursor = 'grabbing';
+          refreshTip(e.clientX, e.clientY);
+        }
+      }
+      return;
+    }
+
+    if (!dragging && !armedId) { handleTargetDwell(lastMouse); handleQDwell(lastMouse); setTraceHot(traceAt(lastMouse, 6)); }
     else setTraceHot(-1);
-    
+
     renderOverlay(lastMouse);
     hoverCanvas.style.cursor = (dragging && dragging.pan) ? 'grabbing' : dragging ? 'grabbing' : armedId ? 'pointer'
-      : (hitNode(lastMouse) ? 'grab' : traceHotIndex >= 0 ? 'pointer' : 'crosshair');
+      : (hitNode(lastMouse) ? 'grab' : tgtHotIndex >= 0 ? 'grab' : traceHotIndex >= 0 ? 'pointer' : 'crosshair');
     refreshTip(e.clientX, e.clientY);
   });
+  hoverCanvas.addEventListener('mouseenter', function () { pointerOverCanvas = true; });
   hoverCanvas.addEventListener('mouseleave', function () {
+    pointerOverCanvas = false;
+    // Opening the context menu puts the cursor over the menu, which fires this.
+    // Keep the inspect circle frozen at the right-click point — it's the whole
+    // reference for what you're about to mark.
+    if (contextMenu.style.display === 'block') return;
     lastMouse = null;
-    if (!dragging) { clearQHot(); setTraceHot(-1); renderOverlay(null); hideTip(); }
+    if (!dragging) { clearQHot(); clearTargetHot(); setTraceHot(-1); renderOverlay(null); hideTip(); }
   });
   hoverCanvas.addEventListener('mousedown', function (e) {
+    if (e.button !== 0) return;                   // left button only — a right
+                                                  // click must not start a pan
     if (armedId) return;                          // arming uses click-to-place
     const rect = hoverCanvas.getBoundingClientRect();
     const m = { x: e.clientX - rect.left, y: e.clientY - rect.top };
@@ -1519,6 +1978,25 @@
       lastMouse = m; lastClient = { x: e.clientX, y: e.clientY };
       renderOverlay(m);
       refreshTip(e.clientX, e.clientY);
+    } else if (targetAt(m, 8) >= 0) {
+      // Pressing on a target circle always grabs it. The dwell only decides
+      // when the highlight appears — gating the grab on it too made the drag
+      // fall through to a pan whenever the dwell had lapsed.
+      e.preventDefault();
+      clearQHot();
+      tgtHotIndex = tgtHoverIndex = targetAt(m, 8);
+      dragging = { target: tgtHotIndex };
+      lastMouse = m; lastClient = { x: e.clientX, y: e.clientY };
+      renderOverlay(m);
+      refreshTip(e.clientX, e.clientY);
+    } else if (qUnderCursor(m) >= 0) {
+      e.preventDefault();
+      clearTargetHot();
+      qHotIndex = qHoverIndex = qUnderCursor(m);
+      dragging = { qIndex: qHotIndex };
+      lastMouse = m; lastClient = { x: e.clientX, y: e.clientY };
+      renderOverlay(m);
+      refreshTip(e.clientX, e.clientY);
     } else {
       // Initiate pan
       dragging = { pan: true, startX: m.x, startY: m.y, startPanX: panX, startPanY: panY };
@@ -1527,6 +2005,7 @@
   });
   window.addEventListener('mouseup', function () {
     if (dragging) {
+      cancelScheduledRender();
       dragging = null;
       armHint.classList.remove('show');
       hoverCanvas.style.cursor = armedId ? 'pointer' : 'crosshair';
@@ -1534,9 +2013,23 @@
       refreshAll();
     }
   });
+  // Shift+double-click resets the view. Driven off 'click' with our own
+  // timestamp check (rather than the native 'dblclick' event) so the
+  // required speed is tighter than the browser's built-in double-click
+  // threshold (~300-500ms) — the user has to click noticeably faster.
+  let lastShiftClickTime = 0;
+  const FAST_DBLCLICK_MS = 250;
   hoverCanvas.addEventListener('click', function (e) {
     if (contextMenu.style.display === 'block') return;
-    if (armedId) commitPreview(); 
+    if (armedId) { commitPreview(); return; }
+    if (!e.shiftKey) { lastShiftClickTime = 0; return; }
+    const now = performance.now();
+    if (now - lastShiftClickTime < FAST_DBLCLICK_MS) {
+      resetView();
+      lastShiftClickTime = 0;
+    } else {
+      lastShiftClickTime = now;
+    }
   });
   hoverCanvas.addEventListener('wheel', function (e) {
     e.preventDefault();
@@ -1577,8 +2070,60 @@
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { setArmed(null); closeContextMenu(); } });
 
   btnUndo.addEventListener('click', function () { comps.pop(); setArmed(null); refreshAll(); closeContextMenu(); });
-  btnReset.addEventListener('click', function () { comps = []; setArmed(null); refreshAll(); closeContextMenu(); });
+  btnReset.addEventListener('click', function () { comps.length = 0; setArmed(null); refreshAll(); closeContextMenu(); });
   btnCancel.addEventListener('click', function () { setArmed(null); closeContextMenu(); });
+
+  // active port's list of marked matching-target circles
+  function markedCircles() {
+    if (!markedByPort[activePort]) markedByPort[activePort] = [];
+    return markedByPort[activePort];
+  }
+  btnMarkTarget.addEventListener('click', function () {
+    if (ctxMenuTarget) { markedCircles().push(ctxMenuTarget); ctxMenuTarget = null; renderOverlay(lastMouse); }
+    closeContextMenu();
+  });
+  btnClearTargets.addEventListener('click', function () {
+    markedCircles().length = 0; clearTargetHot(); renderOverlay(lastMouse); closeContextMenu();
+  });
+
+  // Keep the three equivalent value fields in step with the circle. `skip` is
+  // the input the user is typing in — rewriting it under them would fight the
+  // caret (and clobber half-typed values like "0.").
+  function syncTargetInputs(i, skip) {
+    const m = markedByPort[activePort] && markedByPort[activePort][i];
+    if (!m) return;
+    const v = rhoToVswr(m.rho);
+    if (skip !== tgtGammaIn) tgtGammaIn.value = m.rho.toFixed(3);
+    if (skip !== tgtVswrIn)  tgtVswrIn.value  = isFinite(v) ? v.toFixed(3) : '';
+    if (skip !== tgtRlIn)    tgtRlIn.value    = rhoToDb(m.rho).toFixed(2);
+  }
+  function bindTargetInput(input, toRho) {
+    input.addEventListener('input', function () {
+      if (ctxTargetIndex < 0) return;
+      const raw = parseFloat(input.value);
+      if (isNaN(raw)) return;
+      const rho = toRho(raw);
+      if (isNaN(rho)) return;
+      setTargetRho(ctxTargetIndex, rho);
+      syncTargetInputs(ctxTargetIndex, input);
+      renderOverlay(lastMouse);
+    });
+  }
+  bindTargetInput(tgtGammaIn, function (v) { return v; });
+  bindTargetInput(tgtVswrIn,  vswrToRho);
+  bindTargetInput(tgtRlIn,    dbToRho);
+
+  btnTargetClose.addEventListener('click', function () { closeContextMenu(); });
+  btnQClose.addEventListener('click', function () { closeContextMenu(); });
+  btnDeleteTarget.addEventListener('click', function () {
+    if (ctxTargetIndex >= 0) {
+      markedCircles().splice(ctxTargetIndex, 1);
+      ctxTargetIndex = -1;
+      clearTargetHot();
+      renderOverlay(lastMouse);
+    }
+    closeContextMenu();
+  });
   function downloadText(text, filename, mime) {
     const blob = new Blob([text], { type: mime || 'text/plain' });
     const url = URL.createObjectURL(blob);
@@ -1588,22 +2133,57 @@
     a.click();
     URL.revokeObjectURL(url);
   }
+  function exportSuffix() {
+    return (sParamData && sParamNumPorts > 1) ? '_port' + (activePort + 1) : '';
+  }
   document.getElementById('btn-export-s1p').addEventListener('click', function () {
     const freqs = sweepFrequencies();
-    downloadText(toS1P(computeS11Sweep(freqs), getZ0()), 'smith_chart_network.s1p');
-    closeContextMenu();
+    downloadText(toS1P(computeS11Sweep(freqs), getZ0()), 'smith_chart_network' + exportSuffix() + '.s1p');
   });
   document.getElementById('btn-export-s2p').addEventListener('click', function () {
     const freqs = sweepFrequencies();
-    downloadText(toS2P(computeS2PSweep(freqs), getZ0()), 'smith_chart_network.s2p');
-    closeContextMenu();
+    downloadText(toS2P(computeS2PSweep(freqs), getZ0()), 'smith_chart_network' + exportSuffix() + '.s2p');
   });
-  document.getElementById('btn-reset-view').addEventListener('click', function () {
+  function resetView() {
     zoomScale = 1;
     panX = 0;
     panY = 0;
     resize();
+  }
+  document.getElementById('btn-reset-view').addEventListener('click', function () {
+    resetView();
     closeContextMenu();
+  });
+
+  // ---------- Multi-port selection ----------
+  function buildPortOptions() {
+    sparamPortSel.innerHTML = '';
+    for (let k = 0; k < sParamNumPorts; k++) {
+      const opt = document.createElement('option');
+      opt.value = String(k);
+      opt.textContent = 'Port ' + (k + 1);
+      sparamPortSel.appendChild(opt);
+    }
+  }
+  function updatePortUI() {
+    const multi = !!sParamData && sParamNumPorts > 1;
+    sparamPortField.style.display = multi ? '' : 'none';
+    if (multi) sparamPortSel.value = String(activePort);
+    circuitPortLabel.textContent = multi ? ' — matching Port ' + (activePort + 1) : '';
+  }
+  // switch the active port: swap in that port's independent component chain
+  function setActivePort(p) {
+    if (p < 0 || p >= sParamNumPorts || p === activePort) return;
+    activePort = p;
+    comps = compsByPort[p];
+    clearTargetHot(); ctxTargetIndex = -1;   // indices refer to the old port's circles
+    setArmed(null);
+    updatePortUI();
+    syncLoad();
+    refreshAll();
+  }
+  sparamPortSel.addEventListener('change', function () {
+    setActivePort(parseInt(sparamPortSel.value, 10));
   });
 
   sparamFileIn.addEventListener('change', function(e) {
@@ -1611,11 +2191,21 @@
     if (!file) return;
     const reader = new FileReader();
     reader.onload = function(ev) {
-      const res = parseTouchstone(ev.target.result);
-      if (res.data.length > 0) {
+      const m = file.name.match(/\.s(\d+)p$/i);
+      const res = parseTouchstone(ev.target.result, m ? parseInt(m[1], 10) : 0);
+      if (res.data.length > 0 && res.nPorts > 0) {
         sParamZ0 = res.z0;
         sParamData = res.data;
+        sParamNumPorts = res.nPorts;
+        activePort = 0;
+        compsByPort = [];                       // one empty network per port
+        markedByPort = [];                      // and one independent target set per port
+        for (let k = 0; k < sParamNumPorts; k++) { compsByPort.push([]); markedByPort.push([]); }
+        comps = compsByPort[0];
+        clearTargetHot(); ctxTargetIndex = -1;
         btnClearSparam.style.display = 'inline-block';
+        buildPortOptions();
+        updatePortUI();
         syncLoad();
         refreshAll();
       } else {
@@ -1627,8 +2217,16 @@
 
   btnClearSparam.addEventListener('click', function() {
     sParamData = null;
+    sParamNumPorts = 1;
+    activePort = 0;
+    compsByPort = [[]];
+    comps = compsByPort[0];
+    markedByPort = [[]];
+    clearTargetHot(); ctxTargetIndex = -1;
     sparamFileIn.value = '';
     btnClearSparam.style.display = 'none';
+    setArmed(null);
+    updatePortUI();
     syncLoad();
     refreshAll();
   });
@@ -1661,10 +2259,29 @@
   });
 
   let rt;
-  window.addEventListener('resize', function () { clearTimeout(rt); rt = setTimeout(resize, 100); });
+  window.addEventListener('resize', function () { 
+    clearTimeout(rt); 
+    rt = setTimeout(function() { resize(); if (typeof drawS11Plot === 'function') drawS11Plot(); }, 100); 
+  });
+
+  if (s11Canvas) {
+    s11Canvas.addEventListener('wheel', function(e) {
+      e.preventDefault();
+      const zoomFactor = e.deltaY > 0 ? 1.1 : 0.9;
+      const newMin = Math.min(-5, s11YMin * zoomFactor);
+      s11YMin = Math.max(-200, newMin);
+      drawS11Plot();
+    });
+  }
+  if (s11Panel) {
+    s11Panel.addEventListener('toggle', function() {
+      if (s11Panel.open) drawS11Plot();
+    });
+  }
 
   // ---------- Init ----------
   resLabel.textContent = RES_NAMES[parseInt(resSlider.value, 10) - 1];
+  updatePortUI();
   syncLoad();
   resize();
   refreshAll();

@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Smith Chart — Random Thoughts of a Random Guy</title>
+  <title>Interactive Smith Chart Tool — Random Thoughts of a Random Guy</title>
   <meta name="description" content="Interactive Smith chart with a circuit builder: enter a load, add series/shunt L/C/R components, and place them by moving along constant-R/G/X/B circles.">
   <link rel="stylesheet" href="css/style.css">
   <style>
@@ -19,8 +19,11 @@
       display: grid;
       grid-template-columns: minmax(0, 1.4fr) minmax(0, 0.6fr);
       gap: var(--space-xl);
-      align-items: start;
+      align-items: stretch;
     }
+    /* Build column fills the chart's height so the two panels bottom out level */
+    .build-col { display: flex; flex-direction: column; min-height: 0; }
+    .build-col > .panel { flex: 1 1 auto; overflow-y: auto; }
 
     /* ---- Circuit view (full-width, below the chart) ---- */
     .circuit-view {
@@ -49,6 +52,10 @@
       border-radius: var(--radius-lg);
       box-shadow: var(--shadow-md);
       padding: var(--space-md);
+      /* centre the square chart when the build panel makes the row taller */
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
     }
     #chart-wrap {
       position: relative;
@@ -77,6 +84,18 @@
       color: var(--text-secondary);
       margin-bottom: var(--space-md);
     }
+    details.panel > summary.panel__title {
+      cursor: pointer; list-style: none; user-select: none;
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 0; /* Remove margin when collapsed */
+    }
+    details.panel[open] > summary.panel__title {
+      margin-bottom: var(--space-md);
+    }
+    details.panel > summary.panel__title::-webkit-details-marker { display: none; }
+    details.panel > summary.panel__title::after { content: '▾'; font-size: 1.4em; line-height: 1; transition: transform var(--transition-fast); }
+    details.panel[open] > summary.panel__title::after { transform: rotate(180deg); }
+    details.panel > summary.panel__title:hover { color: var(--accent); }
 
     /* ---- Load / freq / z0 inputs ---- */
     .field-grid {
@@ -245,6 +264,8 @@
       box-shadow: var(--shadow-lg);
       padding: 12px;
       min-width: 200px;
+      max-height: calc(100vh - 20px);
+      overflow-y: auto;
     }
     .context-menu .cm-group { margin-bottom: 12px; }
     .context-menu .cm-group:last-child { margin-bottom: 0; }
@@ -258,6 +279,9 @@
     }
 
 
+    /* ---- Target-circle edit fields (context menu) ---- */
+    .tgt-fields { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-sm); }
+
     /* ---- Display settings ---- */
     .switch { display: flex; align-items: center; gap: var(--space-sm); cursor: pointer; font-size: var(--text-sm); user-select: none; margin-bottom: var(--space-md); }
     .switch input { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
@@ -265,6 +289,20 @@
     .swatch--z { background: #c0392b; }
     .swatch--y { background: #2166ac; }
     .swatch--q { background: #7c3aed; }
+
+    /* ---- Display options dropdown ---- */
+    .disp-dropdown { margin-top: var(--space-md); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+    .disp-dropdown > summary {
+      cursor: pointer; padding: 8px 10px; font-size: var(--text-sm); font-weight: 600;
+      color: var(--text-secondary); list-style: none; user-select: none;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .disp-dropdown > summary::-webkit-details-marker { display: none; }
+    .disp-dropdown > summary::after { content: '▾'; font-size: 0.8em; transition: transform var(--transition-fast); }
+    .disp-dropdown[open] > summary::after { transform: rotate(180deg); }
+    .disp-dropdown > summary:hover { color: var(--accent); }
+    .disp-body { padding: 10px; border-top: 1px solid var(--border-light); }
+    .disp-body .switch:last-of-type { margin-bottom: var(--space-md); }
 
     /* ---- Zc cursor tooltip ---- */
     .zc-tip {
@@ -302,7 +340,7 @@
       <div class="page-header fade-in" style="margin-bottom: var(--space-xl);">
         <h1 class="page-header__title"
           style="font-size: var(--text-3xl); font-weight: 700; margin-bottom: var(--space-sm); letter-spacing: -0.02em;">
-          Smith Chart</h1>
+          Interactive Smith Chart Tool</h1>
       </div>
 
       <div class="smith-workspace">
@@ -319,7 +357,7 @@
           </div>
 
           <!-- Build controls -->
-          <div>
+          <div class="build-col">
             <div class="panel">
               <p class="panel__title">Build network</p>
 
@@ -327,9 +365,13 @@
                 <div class="field" style="grid-column: 1 / -1; margin-bottom: var(--space-sm);">
                   <label for="sparam-file">Load S-Parameter (Touchstone)</label>
                   <div class="input-row">
-                    <input type="file" id="sparam-file" accept=".s1p,.s2p,.ts" style="padding: 3px;">
+                    <input type="file" id="sparam-file" accept=".s1p,.s2p,.s3p,.s4p,.s5p,.s6p,.snp,.ts" style="padding: 3px;">
                     <button id="btn-clear-sparam" class="btn-secondary" style="flex: 0 0 auto; padding: 4px 8px; display: none;">Clear</button>
                   </div>
+                </div>
+                <div class="field" id="sparam-port-field" style="grid-column: 1 / -1; margin-bottom: var(--space-sm); display: none;">
+                  <label for="sparam-port">Match port</label>
+                  <div class="input-row"><select id="sparam-port"></select></div>
                 </div>
                 <div class="field">
                   <label for="sparam-fmin">Trace Fmin</label>
@@ -371,21 +413,60 @@
               </div>
 
               <div class="arm-hint" id="arm-hint"></div>
+
+              <div class="row-actions" style="margin-top: var(--space-md);">
+                <button class="btn-secondary" id="btn-export-s1p" style="flex:1;">Export S1P</button>
+                <button class="btn-secondary" id="btn-export-s2p" style="flex:1;">Export S2P</button>
+              </div>
+
+              <details class="disp-dropdown" id="display-options">
+                <summary>Display options</summary>
+                <div class="disp-body">
+                  <label class="switch">
+                    <input type="checkbox" id="opt-readout" checked>
+                    Hover readout (follows cursor)
+                  </label>
+                  <label class="switch">
+                    <input type="checkbox" id="opt-impedance" checked>
+                    <span class="swatch swatch--z"></span> Impedance grid (r, x)
+                  </label>
+                  <label class="switch">
+                    <input type="checkbox" id="opt-admittance">
+                    <span class="swatch swatch--y"></span> Admittance grid (g, b)
+                  </label>
+                  <label class="switch">
+                    <input type="checkbox" id="opt-q">
+                    <span class="swatch swatch--q"></span> Constant-Q circles
+                  </label>
+
+                  <div style="margin-top: var(--space-md);">
+                    <label class="field-label" for="opt-resolution">Grid resolution — <span id="resolution-label">Standard</span></label>
+                    <input type="range" id="opt-resolution" min="1" max="5" step="1" value="2">
+                  </div>
+                </div>
+              </details>
             </div>
           </div>
         </div>
 
         <!-- ===== Circuit view (below the chart) ===== -->
         <div class="smith-circuit fade-in fade-in-delay-2">
-          <div class="panel">
-            <p class="panel__title">Circuit</p>
+          <details class="panel">
+            <summary class="panel__title">Circuit<span id="circuit-port-label"></span></summary>
             <div class="circuit-view">
               <div class="schematic-wrap" id="schematic"></div>
               <div class="circuit-info">
                 <div class="zin-summary" id="zin-summary"></div>
               </div>
             </div>
-          </div>
+          </details>
+
+          <details class="panel" id="s11-panel">
+            <summary class="panel__title">S11 Plot (Cartesian)</summary>
+            <div style="width: 100%; overflow-x: auto;">
+              <canvas id="s11-canvas" style="display: block; width: 100%; height: 250px; touch-action: none;"></canvas>
+            </div>
+          </details>
         </div>
 
       </div>
@@ -437,39 +518,15 @@
         </div>
       </div>
       <div class="cm-group">
-        <div class="cm-title">Display</div>
-        <label class="switch">
-          <input type="checkbox" id="opt-readout" checked>
-          Hover readout (follows cursor)
-        </label>
-        <label class="switch">
-          <input type="checkbox" id="opt-impedance" checked>
-          <span class="swatch swatch--z"></span> Impedance grid (r, x)
-        </label>
-        <label class="switch">
-          <input type="checkbox" id="opt-admittance">
-          <span class="swatch swatch--y"></span> Admittance grid (g, b)
-        </label>
-        <label class="switch">
-          <input type="checkbox" id="opt-q">
-          <span class="swatch swatch--q"></span> Constant-Q circles
-        </label>
-        <div class="field" style="margin: 0 0 var(--space-md) 24px; max-width: 140px;">
-          <label for="opt-qval">Q value(s)</label>
-          <div class="input-row"><input type="text" id="opt-qval" value="1"></div>
-        </div>
-        <div style="margin-top: var(--space-md);">
-          <label class="field-label" for="opt-resolution">Grid resolution — <span id="resolution-label">Standard</span></label>
-          <input type="range" id="opt-resolution" min="1" max="5" step="1" value="2">
+        <div class="cm-title">Matching target</div>
+        <div class="comp-btns">
+          <button class="btn-secondary" id="btn-mark-target" style="flex:1;">Mark |Γ| circle</button>
+          <button class="btn-secondary" id="btn-clear-targets" style="flex:1;">Clear</button>
         </div>
       </div>
       <div class="row-actions" style="margin-top: 12px;">
         <button class="btn-secondary" id="btn-undo" disabled>↶ Undo</button>
         <button class="btn-secondary" id="btn-reset" disabled>Reset</button>
-      </div>
-      <div class="row-actions" style="margin-top: 6px;">
-        <button class="btn-secondary" id="btn-export-s1p" style="flex:1;">Export S1P</button>
-        <button class="btn-secondary" id="btn-export-s2p" style="flex:1;">Export S2P</button>
       </div>
       <div class="row-actions" style="margin-top: 6px;">
         <button class="btn-secondary" id="btn-reset-view" style="flex:1;">Reset View</button>
@@ -478,7 +535,48 @@
         <button class="btn-primary" id="btn-cancel" style="flex:1;">Cancel</button>
       </div>
     </div>
-    
+
+    <!-- Shown instead of the palette when right-clicking a target circle -->
+    <div id="cm-target-edit" style="display: none;">
+      <div class="cm-group">
+        <div class="cm-title">Target circle</div>
+        <div class="field">
+          <label for="tgt-rl">Target return loss</label>
+          <div class="input-row"><input type="number" id="tgt-rl" max="0" step="0.5"><span class="unit">dB</span></div>
+        </div>
+        <div class="tgt-fields" style="margin-top: 8px;">
+          <div class="field">
+            <label for="tgt-vswr">VSWR</label>
+            <div class="input-row"><input type="number" id="tgt-vswr" min="1" step="0.1"></div>
+          </div>
+          <div class="field">
+            <label for="tgt-gamma">|Γ|</label>
+            <div class="input-row"><input type="number" id="tgt-gamma" min="0" max="1" step="0.01"></div>
+          </div>
+        </div>
+      </div>
+      <div class="row-actions" style="margin-top: 12px;">
+        <button class="btn-secondary" id="btn-delete-target" style="flex:1;">Delete this circle</button>
+      </div>
+      <div class="row-actions" style="margin-top: 6px;">
+        <button class="btn-primary" id="btn-target-close" style="flex:1;">Close</button>
+      </div>
+    </div>
+
+    <!-- Shown instead of the palette when right-clicking a Q circle -->
+    <div id="cm-q-edit" style="display: none;">
+      <div class="cm-group">
+        <div class="cm-title">Constant-Q circles</div>
+        <div class="field">
+          <label for="opt-qval">Q value(s)</label>
+          <div class="input-row"><input type="text" id="opt-qval" value="1"></div>
+        </div>
+      </div>
+      <div class="row-actions" style="margin-top: 12px;">
+        <button class="btn-primary" id="btn-q-close" style="flex:1;">Close</button>
+      </div>
+    </div>
+
     <div id="cm-params" style="display: none;">
       <div class="field">
         <label for="stub-zc">Line / stub Z<sub>c</sub></label>
@@ -488,10 +586,6 @@
         <label for="stub-eeff">ε<sub>eff</sub> (for length)</label>
         <div class="input-row"><input type="number" id="stub-eeff" value="1" min="1" step="0.1"></div>
       </div>
-    </div>
-
-    <div style="margin-top: 12px;">
-      <button class="btn-secondary" id="btn-cancel" style="width: 100%;">Cancel</button>
     </div>
   </div>
 
